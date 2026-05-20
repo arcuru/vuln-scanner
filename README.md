@@ -34,13 +34,13 @@ uv tool install .
 
 ```bash
 # Scan a local repo with the built-in prompt profile
-uv run vuln-scanner /path/to/repo -c vuln_scan
+uv run vuln-scanner /path/to/repo -c vuln-scan
 
 # Scan a remote repo (clones automatically)
 uv run vuln-scanner https://github.com/user/repo -c config.toml
 
 # Increase parallelism
-uv run vuln-scanner /path/to/repo -c vuln_scan -j 8
+uv run uv run vuln-scanner /path/to/repo -c vuln-scan -j 8
 ```
 
 ## How it works
@@ -64,7 +64,7 @@ Two layers: a **prompt profile** (Python module with prompt functions) and a **T
 
 ### Prompt profile (Python)
 
-The built-in profile is `vuln_scan` (in `src/vuln_scanner/configs/vuln_scan.py`). Required functions:
+The built-in profile is `vuln-scan` (in `src/vuln_scanner/configs/vuln_scan.py`). Required functions:
 
 - `recon_prompt() -> str`
 - `hunt_prompt(*, attack_class, scope, function, entry_point, rationale, arch_summary) -> str`

@@ -16,8 +16,9 @@ BRANCH_PREFIX = "vuln-scan"
 
 # Agent backend: "claude" (default) or "pi"
 AGENT = "claude"
-# Extra flags passed to the agent command (applies to both claude and pi)
-# e.g. for pi: AGENT_FLAGS = "--model anthropic/claude-sonnet-4 --thinking low"
+# Extra flags passed verbatim to the agent command.
+# Prefer setting models via the TOML [agent.models] section; use this for
+# backend-specific knobs (e.g. "--thinking high").
 AGENT_FLAGS = ""
 # Default task timeout in seconds (0 = no timeout)
 TASK_TIMEOUT = 0
@@ -30,9 +31,9 @@ TASK_TIMEOUTS: dict[str, int] = {}
 # Set these to use different models per phase for model diversity.
 # ---------------------------------------------------------------------------
 
-RECON_MODEL = None       # e.g. "claude-sonnet-4-20250514"
-HUNT_MODEL = None        # e.g. "claude-sonnet-4-20250514"
-VALIDATE_MODEL = None    # e.g. "claude-opus-4-20250514" (different model for adversarial review)
+RECON_MODEL = None       # e.g. "claude-sonnet-4-6"
+HUNT_MODEL = None        # e.g. "claude-sonnet-4-6"
+VALIDATE_MODEL = None    # e.g. "claude-opus-4-7" (different model for adversarial review)
 GAPFILL_MODEL = None
 HUNT2_MODEL = None       # defaults to HUNT_MODEL if None
 VALIDATE2_MODEL = None   # defaults to VALIDATE_MODEL if None

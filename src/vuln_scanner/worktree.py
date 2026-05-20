@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
-import re
 
 from taskrunner import Task
-from taskrunner.core import RunContext
 
 
 def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:

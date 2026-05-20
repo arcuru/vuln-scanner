@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Multi-phase LLM-powered vulnerability scanner over git repos using isolated worktrees"
 requires-python = ">=3.12"
 license = { text = "AGPL-3.0-or-later" }
-authors = [{ name = "Patrick" }]
+authors = [{ name = "Patrick Jackson", email = "patrick@jackson.dev" }]
 
 dependencies = [
     "rich>=13.0",

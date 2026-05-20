@@ -7,8 +7,6 @@ from pathlib import Path
 import pytest
 
 from taskrunner import (
-    FIFOScheduler,
-    GraphResult,
     Phase,
     Pipeline,
     Task,

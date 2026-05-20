@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import io
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any, Callable
+from typing import IO, TYPE_CHECKING, Any
 
 from rich.progress import Progress, TaskID
 

@@ -27,7 +27,6 @@ from rich.console import Console
 
 from taskrunner import Phase, Pipeline, SetupCallbacks, Task, TaskRunner, TaskStatus
 from taskrunner.model import RunContext
-
 from vuln_scanner.claude import run_agent
 from vuln_scanner.config import Config, load_config
 from vuln_scanner.files import find_source_files

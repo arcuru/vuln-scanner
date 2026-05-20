@@ -107,9 +107,9 @@ flags = ""
 #   gapfill     → agent default
 #   consolidate → agent default
 [agent.models]
-recon       = "claude-sonnet-4-20250514"
-hunt        = "claude-sonnet-4-20250514"
-validate    = "claude-opus-4-20250514"
+recon       = "claude-sonnet-4-6"
+hunt        = "claude-sonnet-4-6"
+validate    = "claude-opus-4-7"   # different model for adversarial review
 # hunt2       = "…"     # unset: falls back to hunt_model
 # validate2   = "…"     # unset: falls back to validate_model
 # dedupe      = "…"

@@ -85,7 +85,7 @@ class TaskGraph:
 
     def _check_cycles(self) -> None:
         """Detect cycles using iterative DFS with three-color marking."""
-        WHITE, GRAY, BLACK = 0, 1, 2
+        WHITE, GRAY, BLACK = 0, 1, 2  # noqa: N806 — DFS color constants
         color: dict[str, int] = {tid: WHITE for tid in self.tasks}
 
         for start_id in self.tasks:

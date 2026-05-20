@@ -4,6 +4,7 @@ __pycache__/
 output/
 worktrees/
 .direnv/
+.pi/
 result
 .ruff_cache/
 .pytest_cache/

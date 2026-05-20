@@ -14,9 +14,9 @@ import importlib.util
 import logging
 import sys
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable
 
 from vuln_scanner.files import DEFAULT_EXCLUDE_DIRS, DEFAULT_EXTENSIONS
 
