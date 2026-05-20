@@ -1,14 +1,16 @@
 # vuln-scanner
 
-Multi-phase LLM-powered vulnerability scanner over git repos using isolated worktrees.
+LLM-driven vulnerability scanner that builds up an **investigation directory**
+per scan target, accumulating history across runs as the target evolves and
+models improve.
 
 ```
-recon → hunt → validate → dedupe → gapfill → hunt2 → validate2 → consolidate
+recon → hunt → validate → dedupe → consolidate     (per run)
 ```
 
-> **Status:** experimental personal project. Expect false positives and meaningful
-> token spend — every hunt task is an independent agent run. Treat findings as
-> leads to validate manually, not as audit output.
+> **Status:** experimental personal project. Expect false positives and
+> meaningful token spend — every hunt task is an independent agent run. Treat
+> findings as leads to validate manually, not as audit output.
 
 ## Prerequisites
 
@@ -32,35 +34,88 @@ uv tool install .
 
 ## Quick start
 
+Create a folder for the investigation, scaffold it against a target, run a
+scan, check status.
+
 ```bash
-# Scan a local repo with the built-in prompt profile
-uv run vuln-scanner /path/to/repo -c vuln-scan
+mkdir cool-project-scan && cd cool-project-scan
 
-# Scan a remote repo (clones automatically)
-uv run vuln-scanner https://github.com/user/repo -c config.toml
+# Clone the target into ./target/, write vuln-scanner.toml + MANIFEST.toml
+uv run vuln-scanner init https://github.com/user/cool-project
 
-# Increase parallelism
-uv run uv run vuln-scanner /path/to/repo -c vuln-scan -j 8
+# Run a scan (uses target's current HEAD; pass --sha to pin a commit)
+uv run vuln-scanner run -j 8
+
+# Re-run later (target may have new commits, or a newer model is available);
+# the next recon reads prior runs and proposes net-new investigations
+uv run vuln-scanner run --sha <newer-sha>
+
+# See the run history
+uv run vuln-scanner status
 ```
+
+The investigation folder is self-contained. Move it, archive it, commit it to
+its own git repo — it stays consistent.
+
+## Investigation directory
+
+`init` scaffolds, `run` produces an immutable per-run directory, `SUMMARY.md`
+at the top always points at the latest run:
+
+```
+my-investigation/
+  vuln-scanner.toml            # config (committed)
+  MANIFEST.toml                # target URL, latest-run pointer
+  target/                      # cloned scan target (gitignored)
+  worktrees/                   # ephemeral worktrees (gitignored)
+  .vuln-scanner.lock           # concurrency guard
+  runs/
+    2026-05-20T14-30-abc1234/  # ISO timestamp + short target SHA
+      manifest.toml            # tool version, models used, target SHA, status
+      recon/HUNT_QUEUE.json
+      hunt/<task-id>/FINDING.md
+      validate/<task-id>/VERIFICATION.md
+      dedupe/FINDINGS.md
+      SUMMARY.md               # cumulative across all runs
+  SUMMARY.md  →  runs/<latest>/SUMMARY.md
+```
+
+The `.gitignore` written by `init` covers `target/`, `worktrees/`, and the
+lockfile — so you can run `git init` in the investigation folder and track
+the config + runs without dragging the target's full history with you.
 
 ## How it works
 
-Each phase runs in its own git worktree, isolating agent artifacts per task:
+Each phase runs in its own git worktree off `target/`, isolating agent
+artifacts per task:
 
-1. **recon** — one task. Maps the codebase architecture and produces `HUNT_QUEUE.json`
-2. **hunt** — fan-out from the queue. Each entry is one attack class in one scope. Produces `FINDING.md`
-3. **validate** — fan-out from hunt tasks. Adversarial review of each finding. Produces `VERIFICATION.md`
-4. **dedupe** (optional) — one task. Groups validated findings by root cause.
-5. **gapfill** (optional) — one task. Identifies coverage gaps, produces `HUNT_QUEUE_2.json`
-6. **hunt2** — fan-out from the gapfill queue. Second hunting pass.
-7. **validate2** — fan-out from hunt2 tasks. Second validation pass.
-8. **consolidate** (optional) — one task. Merges all findings into `SUMMARY.md`
+1. **recon** — one task. Maps architecture and produces `HUNT_QUEUE.json`. On
+   continuation runs, also reads prior runs' `SUMMARY.md` and the git diff
+   since the prior target SHA, then produces a queue of net-new
+   investigations and worthwhile revisits.
+2. **hunt** — fan-out from the queue. Each entry is one attack class in one
+   scope. Produces `FINDING.md` per task.
+3. **validate** — fan-out from hunt tasks. Adversarial review of each finding.
+   Produces `VERIFICATION.md` per task.
+4. **dedupe** — one task. Groups confirmed findings by root cause, records
+   rejected investigations so future recon can skip them. Produces
+   `FINDINGS.md`.
+5. **consolidate** — one task. Produces the cumulative `SUMMARY.md` with each
+   finding tagged **NEW** / **PERSISTS** / **FIXED** / **REGRESSED** relative
+   to prior runs.
 
-Output lands in `output/<phase>/` and `output/logs/`.
+Each run resumes from `.done` sentinels — if interrupted, re-running `run`
+(without `--sha`) picks up where it left off in the same run directory.
+Concurrent `run` invocations in the same investigation folder are refused via
+the lockfile.
+
+If recon decides there's nothing new to investigate (continuation run on an
+unchanged target), it writes an empty queue and the pipeline bails early.
 
 ## Configuration
 
-Two layers: a **prompt profile** (Python module with prompt functions) and a **TOML config** (settings overlay).
+Two layers: a **prompt profile** (Python module with prompt functions, plus
+markdown bodies) and a **TOML config** (settings overlay).
 
 ### Prompt profile (Python + markdown)
 
@@ -73,33 +128,30 @@ configs/
   vuln_scan.py          # settings + glue (loads + renders the .md files)
   prompts/
     _environment.md     # shared snippet injected into every prompt
-    recon.md
+    recon.md            # uses $prior_runs_path for continuation runs
     hunt.md             # uses $attack_class, $scope, $entry_point, …
     validate.md
     dedupe.md
-    gapfill.md
-    consolidate.md
+    consolidate.md      # uses $prior_runs_path
 ```
 
 To tweak what the agents are told, edit the markdown — no Python changes
 needed. Required prompt functions on the profile module:
 
-- `recon_prompt() -> str`
+- `recon_prompt(*, prior_runs_path: str = "") -> str`
 - `hunt_prompt(*, attack_class, scope, function, entry_point, rationale, arch_summary) -> str`
 - `validate_prompt() -> str`
 
-Optional: `dedupe_prompt()`, `gapfill_prompt()`, `consolidate_prompt(output_dir)`.
+Optional: `dedupe_prompt()`, `consolidate_prompt(output_dir, *, prior_runs_path="")`.
 
 Write your own profile by copying `vuln_scan.py` (and the `prompts/` directory)
-and customizing, then reference it:
-
-```bash
-uv run vuln-scanner ./repo -c my_profile.py
-```
+and pointing `vuln-scanner.toml` at it via `[scan] prompt_profile = "..."`.
 
 ### Settings (TOML)
 
-See [`config.example.toml`](config.example.toml) for all options with comments. Key sections:
+`init` writes a minimal `vuln-scanner.toml` into the investigation folder.
+See [`config.example.toml`](config.example.toml) for the full set of options
+with comments. Key sections:
 
 | Section | Purpose |
 |---|---|
@@ -114,7 +166,8 @@ See [`config.example.toml`](config.example.toml) for all options with comments. 
 
 ### Backends
 
-Built-in backends: `claude` (Claude Code CLI) and `pi` (Oh My Pi). Set via `[agent] backend`.
+Built-in backends: `claude` (Claude Code CLI) and `pi` (Oh My Pi). Set via
+`[agent] backend = "..."`.
 
 Custom backends can be defined directly in TOML — no Python code needed:
 
@@ -129,42 +182,32 @@ prompt_flag = "--prompt"
 extra_args = ["--yes"]
 ```
 
-Fields: `executable` (required), `prompt_flag` (required), `model_flag` (optional), `extra_args` (optional). The resulting command is:
+Fields: `executable` (required), `prompt_flag` (required), `model_flag`
+(optional), `extra_args` (optional). The resulting command is:
 
 ```
 gemini-cli --yes --model <name> --prompt <text>
 ```
 
-For backends requiring custom logic beyond flags, implement the `Backend` protocol in `src/vuln_scanner/claude.py` and add to the `BACKENDS` registry.
-
-### Model fallback
-
-When a phase's model is unset, the fallback chain is:
-
-| Phase | Fallback |
-|---|---|
-| recon, hunt, validate, dedupe, gapfill, consolidate | agent default |
-| hunt2 | hunt2_model → hunt_model → agent default |
-| validate2 | validate2_model → validate_model → agent default |
+For backends needing custom logic beyond flags, implement the `Backend`
+protocol in `src/vuln_scanner/claude.py` and add to the `BACKENDS` registry.
 
 ### Timeouts
 
-`task_timeout` sets a global default (0 = no timeout). `task_timeouts` overrides per phase:
+`task_timeout` sets a global default (0 = no timeout). `task_timeouts`
+overrides per phase:
 
 ```toml
 [scan]
 task_timeout = 0          # global default: no timeout
 
 [scan.task_timeouts]
-hunt  = 900               # 15 minutes per hunt task
-hunt2 = 900
+hunt = 900                # 15 minutes per hunt task
+validate = 600
 ```
 
-When a timeout is hit, the agent subprocess receives SIGTERM, then SIGKILL after 5 seconds.
-
-## Resumability
-
-If a scan is interrupted, re-running with the same output directory skips tasks whose outputs already exist. A `.done` sentinel file is written alongside each task's outputs; tasks without the sentinel are re-executed even if output files exist (guarding against partial writes).
+When a timeout is hit, the agent subprocess receives SIGTERM, then SIGKILL
+after 5 seconds.
 
 ## Development
 
@@ -181,11 +224,14 @@ uv run pyright src/
 
 ## Credits
 
-The multi-phase recon → hunt → validate → dedupe → gapfill loop is adapted
-from the architecture Cloudflare describes in
+The multi-phase recon → hunt → validate → dedupe → consolidate architecture
+is adapted from the design Cloudflare describes in
 ["Cyber frontier models: Claude's strengths in software security"](https://blog.cloudflare.com/cyber-frontier-models/),
 which lays out the agentic vulnerability-research pipeline this project
-re-implements on top of Claude Code (or any other agent CLI).
+re-implements on top of Claude Code (or any other agent CLI). Cloudflare's
+in-process gapfill / hunt2 / validate2 second pass is here realized as
+*running the tool again* — the next run's recon reads prior runs' findings
+and produces a queue informed by them.
 
 ## License
 

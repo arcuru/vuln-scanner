@@ -1,10 +1,12 @@
 # ============================================================================
 # Vuln Scanner — example configuration with all available options.
 #
-# Usage: vuln-scanner <repo> -c config.example.toml
+# This file gets copied into an investigation folder as `vuln-scanner.toml`
+# (either by `vuln-scanner init -c <this-file>` or by hand). After that,
+# `vuln-scanner run` reads it from cwd — there is no `-c` flag on `run`.
 #
 # A TOML config overlays settings on top of a "prompt profile" (Python module
-# that defines the LLM prompts).  The built-in profile is "vuln-scan"; you can
+# that defines the LLM prompts). The built-in profile is "vuln-scan"; you can
 # also write your own with custom prompts and reference it via prompt_profile.
 # ============================================================================
 
@@ -45,10 +47,10 @@ prompt_profile = "vuln-scan"
 # Git branch prefix for worktree isolation.
 branch_prefix = "vuln-scan"
 
-# Maximum hunt tasks per phase.  0 = unlimited.
+# Maximum hunt tasks per run. 0 = unlimited.
 max_tasks = 0
 
-# Default task timeout in seconds.  0 = no timeout.
+# Default task timeout in seconds. 0 = no timeout.
 task_timeout = 0
 
 # Per-phase timeout overrides (seconds).
@@ -57,10 +59,7 @@ task_timeout = 0
 recon       = 600
 hunt        = 900
 validate    = 600
-hunt2       = 900
-validate2   = 600
 dedupe      = 300
-gapfill     = 600
 consolidate = 300
 
 
@@ -73,12 +72,8 @@ backend = "claude"
 
 # Extra flags appended to the agent command (space-separated).
 # Examples:  flags = "--verbose"
-#            flags = "--model some-model --thinking low"
+#            flags = "--thinking high"
 flags = ""
-
-# Per-phase model names.  Passed as --model <name> to both backends.
-#   "claude" → claude --model <name> -p "..."
-#   "pi"     → pi --model <name> -p "..."   (supports provider/id syntax)
 
 # Custom backends can be defined entirely in config — no code changes needed.
 # Each entry under [agent.backends] creates a CommandBackend from these fields:
@@ -96,36 +91,25 @@ flags = ""
 # extra_args = ["--yes"]
 #
 # Then set:  backend = "gemini"
-#
-# When a phase's model is unset (commented out or omitted), the fallback is:
-#   recon       → agent default
-#   hunt        → agent default
-#   validate    → agent default
-#   hunt2       → hunt2_model → hunt_model → agent default
-#   validate2   → validate2_model → validate_model → agent default
-#   dedupe      → agent default
-#   gapfill     → agent default
-#   consolidate → agent default
+
+# Per-phase model overrides. Any phase left commented out / unset falls back
+# to the agent backend's configured default.
 [agent.models]
 recon       = "claude-sonnet-4-6"
 hunt        = "claude-sonnet-4-6"
 validate    = "claude-opus-4-7"   # different model for adversarial review
-# hunt2       = "…"     # unset: falls back to hunt_model
-# validate2   = "…"     # unset: falls back to validate_model
 # dedupe      = "…"
-# gapfill     = "…"
 # consolidate = "…"
 
 
 # ---------------------------------------------------------------------------
-# [output] — filenames written by each phase.
+# [output] — filenames written by each phase (inside runs/<run-id>/<phase>/).
 # ---------------------------------------------------------------------------
 [output]
 recon       = "HUNT_QUEUE.json"
 hunt        = "FINDING.md"
 validate    = "VERIFICATION.md"
 dedupe      = "FINDINGS.md"
-gapfill     = "HUNT_QUEUE_2.json"
 consolidate = "SUMMARY.md"
 
 
