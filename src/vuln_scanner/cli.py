@@ -481,13 +481,18 @@ def cmd_init(args: argparse.Namespace) -> None:
         shutil.copy2(src, config_path)
     else:
         config_path.write_text(
-            "# vuln-scanner config. See https://github.com/... for all options.\n"
+            "# vuln-scanner config. See config.example.toml in the vuln-scanner\n"
+            "# repo for the full set of options with comments.\n"
             "\n"
             "[scan]\n"
             'prompt_profile = "vuln-scan"\n'
             "\n"
             "[agent]\n"
             'backend = "claude"\n'
+            "# [agent.models]\n"
+            '# recon    = "claude-sonnet-4-6"\n'
+            '# hunt     = "claude-sonnet-4-6"\n'
+            '# validate = "claude-opus-4-7"\n'
         )
 
     Manifest(target_url=args.target_url).dump(cwd / "MANIFEST.toml")

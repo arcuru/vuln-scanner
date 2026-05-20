@@ -83,6 +83,21 @@ class TestCmdInit:
         with pytest.raises(SystemExit):
             cli.cmd_init(args)
 
+    def test_default_config_is_loadable(self, cwd, tmp_path):
+        """The auto-generated vuln-scanner.toml must round-trip through load_config."""
+        from vuln_scanner.config import load_config
+
+        origin = tmp_path / "origin"
+        _init_origin(origin)
+        cli.cmd_init(argparse.Namespace(target_url=str(origin), config=None))
+
+        cfg = load_config(str(cwd / "vuln-scanner.toml"))
+        assert cfg.agent == "claude"
+        assert cfg.branch_prefix == "vuln-scan"
+        # commented-out model entries should not leak in
+        assert cfg.recon_model is None
+        assert cfg.hunt_model is None
+
     def test_copies_provided_config(self, cwd, tmp_path):
         origin = tmp_path / "origin"
         _init_origin(origin)

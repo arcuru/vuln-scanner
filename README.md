@@ -57,6 +57,44 @@ uv run vuln-scanner status
 The investigation folder is self-contained. Move it, archive it, commit it to
 its own git repo — it stays consistent.
 
+## CLI reference
+
+```text
+$ vuln-scanner --help
+usage: vuln-scanner [-h] {init,run,status} ...
+
+Multi-phase LLM vulnerability scanner over a single target investigation.
+
+positional arguments:
+  {init,run,status}
+    init             Initialize an investigation directory in cwd (clones
+                     target, writes config).
+    run              Execute one scan run against target/ in cwd.
+    status           List runs in this investigation.
+
+$ vuln-scanner init --help
+usage: vuln-scanner init [-h] [-c CONFIG] target_url
+
+positional arguments:
+  target_url           Git URL of the target repo to clone
+
+options:
+  -c, --config CONFIG  Path to a vuln-scanner.toml to copy in (default:
+                       minimal built-in)
+
+$ vuln-scanner run --help
+usage: vuln-scanner run [-h] [--sha SHA] [-j JOBS] [-v]
+
+options:
+  --sha SHA        Target commit SHA to pin (default: keep current target
+                   HEAD)
+  -j, --jobs JOBS  Parallel workers (default: 4)
+  -v, --verbose
+
+$ vuln-scanner status --help
+usage: vuln-scanner status [-h]
+```
+
 ## Investigation directory
 
 `init` scaffolds, `run` produces an immutable per-run directory, `SUMMARY.md`
@@ -149,7 +187,21 @@ and pointing `vuln-scanner.toml` at it via `[scan] prompt_profile = "..."`.
 
 ### Settings (TOML)
 
-`init` writes a minimal `vuln-scanner.toml` into the investigation folder.
+`init` writes a minimal `vuln-scanner.toml` into the investigation folder
+(unless you pass `-c <path>` to copy in your own):
+
+```toml
+[scan]
+prompt_profile = "vuln-scan"
+
+[agent]
+backend = "claude"
+# [agent.models]
+# recon    = "claude-sonnet-4-6"
+# hunt     = "claude-sonnet-4-6"
+# validate = "claude-opus-4-7"
+```
+
 See [`config.example.toml`](config.example.toml) for the full set of options
 with comments. Key sections:
 
