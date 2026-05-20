@@ -6,17 +6,41 @@ Multi-phase LLM-powered vulnerability scanner over git repos using isolated work
 recon → hunt → validate → dedupe → gapfill → hunt2 → validate2 → consolidate
 ```
 
+> **Status:** experimental personal project. Expect false positives and meaningful
+> token spend — every hunt task is an independent agent run. Treat findings as
+> leads to validate manually, not as audit output.
+
+## Prerequisites
+
+- Python 3.12+
+- [`uv`](https://docs.astral.sh/uv/) for dependency and environment management
+- `git` on `$PATH`
+- An agent CLI for the chosen backend, authenticated:
+  - [`claude`](https://github.com/anthropics/claude-code) — default backend
+  - [`pi`](https://github.com/anthropics/oh-my-pi) — alternative backend
+  - Anything else you wire up via a custom `[agent.backends.*]` entry
+
+## Install
+
+```bash
+# Run from a checkout without installing globally
+uv run vuln-scanner --help
+
+# Or install as a uv tool (puts `vuln-scanner` on $PATH)
+uv tool install .
+```
+
 ## Quick start
 
 ```bash
 # Scan a local repo with the built-in prompt profile
-vuln-scanner /path/to/repo -c vuln_scan
+uv run vuln-scanner /path/to/repo -c vuln_scan
 
 # Scan a remote repo (clones automatically)
-vuln-scanner https://github.com/user/repo -c config.toml
+uv run vuln-scanner https://github.com/user/repo -c config.toml
 
 # Increase parallelism
-vuln-scanner /path/to/repo -c vuln_scan -j 8
+uv run vuln-scanner /path/to/repo -c vuln_scan -j 8
 ```
 
 ## How it works
@@ -136,6 +160,14 @@ uv run pytest tests/ -v
 uv run pyright src/
 ```
 
+## Credits
+
+The multi-phase recon → hunt → validate → dedupe → gapfill loop is adapted
+from the architecture Cloudflare describes in
+["Cyber frontier models: Claude's strengths in software security"](https://blog.cloudflare.com/cyber-frontier-models/),
+which lays out the agentic vulnerability-research pipeline this project
+re-implements on top of Claude Code (or any other agent CLI).
+
 ## License
 
-MIT
+AGPL-3.0-or-later. See [`LICENSE.txt`](LICENSE.txt).
