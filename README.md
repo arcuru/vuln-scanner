@@ -62,9 +62,27 @@ Output lands in `output/<phase>/` and `output/logs/`.
 
 Two layers: a **prompt profile** (Python module with prompt functions) and a **TOML config** (settings overlay).
 
-### Prompt profile (Python)
+### Prompt profile (Python + markdown)
 
-The built-in profile is `vuln-scan` (in `src/vuln_scanner/configs/vuln_scan.py`). Required functions:
+The built-in profile is `vuln-scan` (in `src/vuln_scanner/configs/vuln_scan.py`).
+The prompt bodies live alongside it in `src/vuln_scanner/configs/prompts/` —
+one `.md` per phase, with `$variable` placeholders substituted at render time:
+
+```
+configs/
+  vuln_scan.py          # settings + glue (loads + renders the .md files)
+  prompts/
+    _environment.md     # shared snippet injected into every prompt
+    recon.md
+    hunt.md             # uses $attack_class, $scope, $entry_point, …
+    validate.md
+    dedupe.md
+    gapfill.md
+    consolidate.md
+```
+
+To tweak what the agents are told, edit the markdown — no Python changes
+needed. Required prompt functions on the profile module:
 
 - `recon_prompt() -> str`
 - `hunt_prompt(*, attack_class, scope, function, entry_point, rationale, arch_summary) -> str`
@@ -72,10 +90,11 @@ The built-in profile is `vuln-scan` (in `src/vuln_scanner/configs/vuln_scan.py`)
 
 Optional: `dedupe_prompt()`, `gapfill_prompt()`, `consolidate_prompt(output_dir)`.
 
-Write your own by copying `vuln_scan.py` and customizing the prompts, then reference it:
+Write your own profile by copying `vuln_scan.py` (and the `prompts/` directory)
+and customizing, then reference it:
 
 ```bash
-vuln-scanner ./repo -c my_profile.py
+uv run vuln-scanner ./repo -c my_profile.py
 ```
 
 ### Settings (TOML)
