@@ -15,7 +15,7 @@ import pytest
 from vuln_scanner.configs import vuln_scan
 
 
-def test_recon_prompt_renders():
+def test_recon_prompt_renders_first_run():
     out = vuln_scan.recon_prompt()
     # Shared $environment block was substituted
     assert "isolated git worktree" in out
@@ -24,6 +24,14 @@ def test_recon_prompt_renders():
     # No leftover $placeholder
     assert "$environment" not in out
     assert "$attack_classes" not in out
+    assert "$prior_runs_path" not in out
+
+
+def test_recon_prompt_includes_prior_runs_path():
+    out = vuln_scan.recon_prompt(prior_runs_path="/abs/path/to/runs")
+    assert "/abs/path/to/runs" in out
+    # Continuation-mode instructions are present
+    assert "continuation run" in out.lower()
 
 
 def test_hunt_prompt_substitutes_all_fields():
@@ -78,12 +86,6 @@ def test_dedupe_prompt_renders():
     assert "$environment" not in out
 
 
-def test_gapfill_prompt_lists_attack_classes():
-    out = vuln_scan.gapfill_prompt()
-    assert "command_injection" in out
-    assert "$attack_classes" not in out
-
-
 def test_consolidate_prompt_none_when_no_dedupe_output(tmp_path):
     assert vuln_scan.consolidate_prompt(tmp_path) is None
 
@@ -97,6 +99,15 @@ def test_consolidate_prompt_renders_when_findings_exist(tmp_path):
     assert "SUMMARY.md" in out
 
 
+def test_consolidate_prompt_includes_prior_runs_path(tmp_path):
+    dedupe_dir = tmp_path / "dedupe"
+    dedupe_dir.mkdir()
+    (dedupe_dir / "FINDINGS.md").write_text("# findings")
+    out = vuln_scan.consolidate_prompt(tmp_path, prior_runs_path="/some/runs")
+    assert out is not None
+    assert "/some/runs" in out
+
+
 def test_all_prompt_files_present():
     """Sanity: every prompt referenced by the profile exists on disk."""
     prompts_dir = Path(vuln_scan.__file__).parent / "prompts"
@@ -106,11 +117,12 @@ def test_all_prompt_files_present():
         "hunt.md",
         "validate.md",
         "dedupe.md",
-        "gapfill.md",
         "consolidate.md",
     }
     actual = {p.name for p in prompts_dir.glob("*.md")}
     assert expected <= actual, f"missing: {expected - actual}"
+    # Ensure the old gapfill prompt is gone (would silently render-fail)
+    assert "gapfill.md" not in actual
 
 
 def test_substitute_fails_loudly_on_missing_var(monkeypatch, tmp_path):

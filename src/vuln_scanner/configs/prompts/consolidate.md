@@ -1,28 +1,47 @@
-You are writing the final human-readable vulnerability report. The deduplication
-phase has already grouped findings by root cause. Your job is to produce a
-clear, actionable report for human readers from the structured deduplication
-output and individual reports.
+You are writing the **cumulative** human-readable vulnerability report for an
+ongoing investigation. The deduplication phase has grouped this run's findings
+by root cause. Your job is to merge them with prior runs' findings into a
+single report that reflects the current state of the investigation across all
+runs to date.
 
 $environment
 
 ## Available Data
 
-Reports have been copied into the `reports/` directory:
-- `reports/dedupe/FINDINGS.md` — the authoritative deduplicated findings
-- `reports/hunt/<task_id>/FINDING.md` — individual hunt reports
-- `reports/validate/<task_id>/VERIFICATION.md` — individual validations
+Reports for this run have been copied into the `reports/` directory:
+- `reports/dedupe/FINDINGS.md` — this run's deduplicated findings (authoritative
+  for the current run, includes a Rejected Investigations section)
+- `reports/hunt/<task_id>/FINDING.md` — this run's hunt reports
+- `reports/validate/<task_id>/VERIFICATION.md` — this run's validations
+
+Prior runs are at `$prior_runs_path` (empty for the first run). When non-empty:
+- `<prior_runs_path>/<run-id>/SUMMARY.md` — the cumulative report from each
+  prior run. The most recent one is the best starting point — its findings are
+  already tagged with NEW / PERSISTS / FIXED / REGRESSED.
+- `<prior_runs_path>/<run-id>/manifest.toml` — `target_sha` of that run.
 
 ## Task
 
-1. Read `reports/dedupe/FINDINGS.md` — this is your source of truth for
-   which vulnerabilities exist and how they're grouped.
+1. Read `reports/dedupe/FINDINGS.md` — this run's findings.
 
-2. For each vulnerability, read the referenced evidence files for full
-   details, PoC code, and reproduction steps.
+2. If this is a continuation run, read the most recent prior run's
+   `SUMMARY.md` to see prior findings and their last-known state.
 
-3. Write a clean, well-organized report that a security engineer can act on.
-   Include enough detail to reproduce and fix each finding, but don't bury
-   the reader in raw logs.
+3. **Reconcile each finding** with prior state and tag it:
+   - **NEW** — first surfaced in this run
+   - **PERSISTS** — present in a prior run, still confirmed at this run's SHA
+   - **FIXED** — present in a prior run, no longer reproducible at this SHA
+     (either the target code changed and the bug is gone, or this run's
+     adversarial validation REJECTED what was previously CONFIRMED)
+   - **REGRESSED** — was FIXED in some intermediate run, has returned
+
+   Use natural-language matching by attack class + scope + root cause. There
+   is no stable cross-run vuln identifier — the agent does the matching.
+
+4. For each finding, read evidence files (this run's, and prior runs' if
+   relevant) for full details, PoC code, and reproduction steps.
+
+5. Write a clean, well-organized report that a security engineer can act on.
 
 ## Output
 
@@ -31,18 +50,24 @@ Write SUMMARY.md in the repo root:
 ```markdown
 # Vulnerability Report — <project name>
 
-> Generated: <date>
-> Pipeline: recon → hunt → validate → dedupe → gapfill → hunt2 → validate2 → consolidate
+> Run: <this run-id>
+> Target SHA: <this run's target SHA>
+> Prior runs considered: <N>  (most recent: <prior run-id> at <prior SHA>)
 
 ## Overview
-- **Total scan tasks:** <N>
-- **Findings confirmed:** <N> | **Rejected:** <N> | **Needs review:** <N>
-- **Unique vulnerabilities:** <N>
-- **CRITICAL:** <n> | **HIGH:** <n> | **MEDIUM:** <n> | **LOW:** <n>
+- **This run's tasks:** <N>  (confirmed <N>, rejected <N>, needs-review <N>)
+- **Cumulative unique vulnerabilities:** <N>
+  (NEW: <n>, PERSISTS: <n>, FIXED: <n>, REGRESSED: <n>)
+- **By severity (active only — NEW + PERSISTS + REGRESSED):**
+  CRITICAL <n>, HIGH <n>, MEDIUM <n>, LOW <n>
 
 ## Findings
 
-### VULN-001: <Title> [SEVERITY]
+### VULN-001: <Title> [SEVERITY] [STATUS]
+
+**Status:** NEW | PERSISTS | FIXED | REGRESSED
+**First seen:** <run-id> (target SHA <sha>)
+**Last confirmed:** <run-id> (target SHA <sha>)  *omit if status is FIXED*
 
 **Attack class:** <command_injection, sql_injection, etc.>
 
@@ -54,22 +79,21 @@ Write SUMMARY.md in the repo root:
 
 **Attack scenario:** <how an attacker would exploit this, step by step>
 
-**Proof of concept:** <reference the best PoC from the individual reports,
-or summarize the reproduction steps>
+**Proof of concept:** <reference the best PoC from this or prior runs>
 
 **Suggested fix:** <brief, actionable recommendation>
 
 **Evidence:**
 - [reports/hunt/task-id/FINDING.md](reports/hunt/task-id/FINDING.md)
 - [reports/validate/task-id/VERIFICATION.md](reports/validate/task-id/VERIFICATION.md)
+- (prior runs:) [<prior-run-id>/SUMMARY.md](../<prior-run-id>/SUMMARY.md)
 
 ---
 ### VULN-002: ...
 ```
 
-Sort by severity (CRITICAL first). Be thorough but concise — this report will
-be read by humans making remediation decisions.
+Sort by status (NEW + REGRESSED first, then PERSISTS, then FIXED), then by
+severity within each group. Be thorough but concise.
 
-If there are zero confirmed vulnerabilities, write a report clearly stating
-that and summarizing what was checked and why no vulnerabilities were found.
-This is just as important as finding bugs.
+If this run found zero new vulnerabilities and nothing changed in prior
+findings' status, write a brief report stating that explicitly.

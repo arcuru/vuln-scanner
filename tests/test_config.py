@@ -17,8 +17,8 @@ from vuln_scanner.config import load_config
 
 MINIMAL_PROFILE = textwrap.dedent(
     """
-    def recon_prompt():
-        return "recon"
+    def recon_prompt(*, prior_runs_path=""):
+        return f"recon prior={prior_runs_path}"
 
     def hunt_prompt(*, attack_class, scope, function, entry_point,
                     rationale, arch_summary):
@@ -36,11 +36,8 @@ FULL_PROFILE = MINIMAL_PROFILE + textwrap.dedent(
     def dedupe_prompt():
         return "dedupe"
 
-    def gapfill_prompt():
-        return "gapfill"
-
-    def consolidate_prompt(output_dir):
-        return f"consolidate {output_dir}"
+    def consolidate_prompt(output_dir, *, prior_runs_path=""):
+        return f"consolidate {output_dir} prior={prior_runs_path}"
     """
 )
 
@@ -71,20 +68,22 @@ def _write_toml(tmp_path: Path, profile_path: Path, body: str = "") -> Path:
 class TestLoadPythonProfile:
     def test_minimal_profile(self, tmp_path):
         cfg = load_config(str(_write_profile(tmp_path)))
-        assert cfg.recon_prompt() == "recon"
+        assert cfg.recon_prompt() == "recon prior="
+        assert cfg.recon_prompt(prior_runs_path="/x") == "recon prior=/x"
         assert cfg.validate_prompt() == "validate"
         assert not cfg.has_dedupe
-        assert not cfg.has_gapfill
         assert not cfg.has_consolidate
 
     def test_full_profile(self, tmp_path):
         cfg = load_config(str(_write_profile(tmp_path, FULL_PROFILE)))
         assert cfg.has_dedupe
-        assert cfg.has_gapfill
         assert cfg.has_consolidate
         assert cfg.dedupe_prompt() == "dedupe"
-        assert cfg.gapfill_prompt() == "gapfill"
-        assert cfg.consolidate_prompt(Path("/out")) == "consolidate /out"
+        assert cfg.consolidate_prompt(Path("/out")) == "consolidate /out prior="
+        assert (
+            cfg.consolidate_prompt(Path("/out"), prior_runs_path="/p")
+            == "consolidate /out prior=/p"
+        )
 
     def test_builtin_profile_by_name(self):
         # Builtin profile in src/vuln_scanner/configs/vuln_scan.py
@@ -190,17 +189,16 @@ class TestTomlOverlay:
             recon    = "model-a"
             hunt     = "model-b"
             validate = "model-c"
-            hunt2    = "model-d"
+            dedupe   = "model-d"
             """
         ).strip())
         cfg = load_config(str(toml))
         assert cfg.recon_model == "model-a"
         assert cfg.hunt_model == "model-b"
         assert cfg.validate_model == "model-c"
-        assert cfg.hunt2_model == "model-d"
+        assert cfg.dedupe_model == "model-d"
         # not set -> remains None
-        assert cfg.validate2_model is None
-        assert cfg.dedupe_model is None
+        assert cfg.consolidate_model is None
 
     def test_flat_model_keys_supported(self, tmp_path):
         profile = _write_profile(tmp_path)
@@ -365,37 +363,26 @@ class TestTimeoutFor:
 
 
 # ---------------------------------------------------------------------------
-# Model fallback semantics (documented chain for hunt2/validate2)
+# Model selection
 # ---------------------------------------------------------------------------
 
 
-class TestModelFallback:
-    """The README documents:
-        hunt2     → hunt2_model     → hunt_model     → agent default
-        validate2 → validate2_model → validate_model → agent default
-
-    The actual fallback happens in cli.py via `_model or cfg.hunt_model`.
-    These tests pin the `or`-chain semantics so a future refactor that
-    moves the logic into Config doesn't silently change behavior.
-    """
-
-    def test_hunt2_uses_own_model_when_set(self, tmp_path):
+class TestModelFor:
+    def test_model_for_unset(self, tmp_path):
         cfg = load_config(str(_write_profile(tmp_path)))
-        cfg.hunt_model = "hunt-default"
-        cfg.hunt2_model = "hunt2-explicit"
-        assert (cfg.hunt2_model or cfg.hunt_model) == "hunt2-explicit"
+        for phase in ("recon", "hunt", "validate", "dedupe", "consolidate"):
+            assert cfg.model_for(phase) is None
 
-    def test_hunt2_falls_back_to_hunt(self, tmp_path):
+    def test_model_for_set(self, tmp_path):
         cfg = load_config(str(_write_profile(tmp_path)))
-        cfg.hunt_model = "hunt-default"
-        cfg.hunt2_model = None
-        assert (cfg.hunt2_model or cfg.hunt_model) == "hunt-default"
+        cfg.hunt_model = "claude-sonnet-4-6"
+        assert cfg.model_for("hunt") == "claude-sonnet-4-6"
+        assert cfg.model_for("recon") is None
 
-    def test_hunt2_falls_through_to_none(self, tmp_path):
+    def test_model_for_unknown_phase(self, tmp_path):
         cfg = load_config(str(_write_profile(tmp_path)))
-        cfg.hunt_model = None
-        cfg.hunt2_model = None
-        assert (cfg.hunt2_model or cfg.hunt_model) is None
+        # unknown phase -> None (no attribute, getattr default)
+        assert cfg.model_for("gapfill") is None
 
 
 # ---------------------------------------------------------------------------

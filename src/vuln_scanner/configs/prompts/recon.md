@@ -4,6 +4,33 @@ that downstream agents will use to find vulnerabilities.
 
 $environment
 
+## Prior History
+
+If the path `$prior_runs_path` is non-empty and contains directories, **this is
+a continuation run** — read prior history first:
+
+1. List `$prior_runs_path` to see every previous run (sorted chronologically).
+2. Read each prior run's `SUMMARY.md` and `dedupe/FINDINGS.md`. The SUMMARY is
+   cumulative; FINDINGS is the per-run deduplicated output (including REJECTED
+   investigations in its own section).
+3. Read the most recent run's `manifest.toml` to get the `target_sha` it
+   scanned. Run `git log <that-sha>..HEAD --stat` in the target repo to see
+   what has changed in the code since.
+
+Then produce a hunt queue that:
+
+- **Targets net-new investigations**: areas changed since the prior scan,
+  attack-class × scope combinations never tried before, subsystems prior recon
+  didn't reach.
+- **Re-examines worthwhile prior items**: a confirmed-vulnerable code path
+  that may have a different verdict at the current SHA, or a NEEDS-REVIEW
+  finding worth a second look with the current model.
+- **Skips already-rejected investigations** unless the relevant code has
+  changed substantially. Don't burn cycles re-confirming rejections.
+
+If the path is empty or has no run directories, this is a **first run** —
+follow the task below without prior context.
+
 ## Task
 
 1. **Read the project top-down.** Start with the README, build files

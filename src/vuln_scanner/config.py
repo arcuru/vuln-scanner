@@ -1,11 +1,10 @@
-"""Config loading — supports Python modules (backward compat) and TOML config files.
+"""Config loading — supports Python modules (prompt profiles) and TOML overlays.
 
 Python modules (prompt profiles) define prompt functions.
 TOML config files overlay settings on top of a prompt profile.
 
-Required in either form:
-    recon_prompt(), hunt_prompt(), validate_prompt()  (from profile)
-Optional: dedupe_prompt(), gapfill_prompt(), consolidate_prompt()
+Required prompt functions: recon_prompt(), hunt_prompt(), validate_prompt()
+Optional: dedupe_prompt(), consolidate_prompt()
 """
 
 from __future__ import annotations
@@ -42,6 +41,8 @@ DEFAULT_ATTACK_CLASSES = [
     "information_disclosure",
 ]
 
+_PHASES = ("recon", "hunt", "validate", "dedupe", "consolidate")
+
 
 class Config:
     """Wraps settings + prompt functions. Built from a Python module, with
@@ -70,10 +71,7 @@ class Config:
         self.recon_model: str | None = getattr(mod, "RECON_MODEL", None)
         self.hunt_model: str | None = getattr(mod, "HUNT_MODEL", None)
         self.validate_model: str | None = getattr(mod, "VALIDATE_MODEL", None)
-        self.hunt2_model: str | None = getattr(mod, "HUNT2_MODEL", None)
-        self.validate2_model: str | None = getattr(mod, "VALIDATE2_MODEL", None)
         self.dedupe_model: str | None = getattr(mod, "DEDUPE_MODEL", None)
-        self.gapfill_model: str | None = getattr(mod, "GAPFILL_MODEL", None)
         self.consolidate_model: str | None = getattr(mod, "CONSOLIDATE_MODEL", None)
 
         # Output filenames
@@ -81,23 +79,21 @@ class Config:
         self.hunt_output: str = getattr(mod, "HUNT_OUTPUT", "FINDING.md")
         self.validate_output: str = getattr(mod, "VALIDATE_OUTPUT", "VERIFICATION.md")
         self.dedupe_output: str = getattr(mod, "DEDUPE_OUTPUT", "FINDINGS.md")
-        self.gapfill_output: str = getattr(mod, "GAPFILL_OUTPUT", "HUNT_QUEUE_2.json")
         self.consolidate_output: str = getattr(mod, "CONSOLIDATE_OUTPUT", "SUMMARY.md")
 
         # Prompt functions
-        self._recon_prompt: Callable[[], str] = mod.recon_prompt
+        self._recon_prompt: Callable[..., str] = mod.recon_prompt
         self._hunt_prompt: Callable[..., str] = mod.hunt_prompt
         self._validate_prompt: Callable[[], str] = mod.validate_prompt
         self._dedupe_prompt: Callable[[], str] | None = getattr(mod, "dedupe_prompt", None)
-        self._gapfill_prompt: Callable[[], str] | None = getattr(mod, "gapfill_prompt", None)
-        self._consolidate_prompt: Callable[[Path], str] | None = getattr(
+        self._consolidate_prompt: Callable[..., str | None] | None = getattr(
             mod, "consolidate_prompt", None,
         )
 
     # -- Prompt accessors --
 
-    def recon_prompt(self) -> str:
-        return self._recon_prompt()
+    def recon_prompt(self, *, prior_runs_path: str = "") -> str:
+        return self._recon_prompt(prior_runs_path=prior_runs_path)
 
     def hunt_prompt(
         self,
@@ -126,14 +122,9 @@ class Config:
             return self._dedupe_prompt()
         return None
 
-    def gapfill_prompt(self) -> str | None:
-        if self._gapfill_prompt:
-            return self._gapfill_prompt()
-        return None
-
-    def consolidate_prompt(self, output_dir: Path) -> str | None:
+    def consolidate_prompt(self, output_dir: Path, *, prior_runs_path: str = "") -> str | None:
         if self._consolidate_prompt:
-            return self._consolidate_prompt(output_dir)
+            return self._consolidate_prompt(output_dir, prior_runs_path=prior_runs_path)
         return None
 
     @property
@@ -141,13 +132,8 @@ class Config:
         return self._dedupe_prompt is not None
 
     @property
-    def has_gapfill(self) -> bool:
-        return self._gapfill_prompt is not None
-
-    @property
     def has_consolidate(self) -> bool:
         return self._consolidate_prompt is not None
-
 
     def timeout_for(self, phase: str) -> int | None:
         """Return the effective timeout for a phase (None = no timeout).
@@ -157,6 +143,10 @@ class Config:
         """
         t = self.task_timeouts.get(phase, self.task_timeout)
         return t if t > 0 else None
+
+    def model_for(self, phase: str) -> str | None:
+        """Return the configured model for a phase (None = backend default)."""
+        return getattr(self, f"{phase}_model", None)
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +158,7 @@ def load_config(name_or_path: str) -> Config:
     """Load config from a TOML file, Python file, or builtin profile name.
 
     TOML files (*.toml): settings from TOML overlay the prompt profile.
-    Python files (*.py) or builtin names: load directly as Python module
-    (backward compatible).
+    Python files (*.py) or builtin names: load directly as Python module.
     """
     path = Path(name_or_path)
 
@@ -208,7 +197,7 @@ def _load_toml_config(toml_path: Path) -> Config:
     if "flags" in agent_cfg:
         cfg.agent_flags = agent_cfg["flags"]
     models_cfg = agent_cfg.get("models", {})
-    for phase in ("recon", "hunt", "validate", "hunt2", "validate2", "dedupe", "gapfill", "consolidate"):
+    for phase in _PHASES:
         key = f"model_{phase}"
         val = models_cfg.get(phase) or agent_cfg.get(key)
         if val:
@@ -240,7 +229,7 @@ def _load_toml_config(toml_path: Path) -> Config:
 
     # Output filenames
     output_cfg = data.get("output", {})
-    for key in ("recon", "hunt", "validate", "dedupe", "gapfill", "consolidate"):
+    for key in _PHASES:
         if key in output_cfg:
             setattr(cfg, f"{key}_output", output_cfg[key])
 
@@ -284,7 +273,7 @@ def _load_profile_module(name: str) -> ModuleType:
 
 
 def _load_python_config(name_or_path: str) -> Config:
-    """Load config from a Python file or builtin name (backward compatible)."""
+    """Load config from a Python file or builtin name."""
     mod = _load_profile_module(name_or_path)
 
     for attr in ("recon_prompt", "hunt_prompt", "validate_prompt"):

@@ -1,6 +1,6 @@
 """Vulnerability scan profile.
 
-Pipeline: recon → hunt → validate → dedupe → gapfill → hunt2 → validate2 → consolidate.
+Pipeline: recon → hunt → validate → dedupe → consolidate.
 
 Prompt bodies live alongside this file in ``prompts/`` (one ``.md`` per phase,
 with ``$variable`` placeholders). This module wires settings + parameterized
@@ -23,7 +23,7 @@ AGENT_FLAGS = ""
 # Default task timeout in seconds (0 = no timeout)
 TASK_TIMEOUT = 0
 # Per-phase timeout overrides (phase_name -> seconds)
-# e.g. {"hunt": 900, "validate": 600, "hunt2": 900, "validate2": 600}
+# e.g. {"hunt": 900, "validate": 600}
 TASK_TIMEOUTS: dict[str, int] = {}
 
 # ---------------------------------------------------------------------------
@@ -34,9 +34,6 @@ TASK_TIMEOUTS: dict[str, int] = {}
 RECON_MODEL = None       # e.g. "claude-sonnet-4-6"
 HUNT_MODEL = None        # e.g. "claude-sonnet-4-6"
 VALIDATE_MODEL = None    # e.g. "claude-opus-4-7" (different model for adversarial review)
-GAPFILL_MODEL = None
-HUNT2_MODEL = None       # defaults to HUNT_MODEL if None
-VALIDATE2_MODEL = None   # defaults to VALIDATE_MODEL if None
 DEDUPE_MODEL = None
 CONSOLIDATE_MODEL = None
 
@@ -72,7 +69,6 @@ RECON_OUTPUT = "HUNT_QUEUE.json"
 HUNT_OUTPUT = "FINDING.md"
 VALIDATE_OUTPUT = "VERIFICATION.md"
 DEDUPE_OUTPUT = "FINDINGS.md"
-GAPFILL_OUTPUT = "HUNT_QUEUE_2.json"
 CONSOLIDATE_OUTPUT = "SUMMARY.md"
 
 # ---------------------------------------------------------------------------
@@ -99,8 +95,12 @@ def _render(name: str, **extra: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def recon_prompt() -> str:
-    return _render("recon")
+def recon_prompt(*, prior_runs_path: str = "") -> str:
+    """Recon prompt. Pass the absolute path of ``runs/`` for continuation runs.
+
+    Empty string (the default) signals "first run, no prior history."
+    """
+    return _render("recon", prior_runs_path=prior_runs_path)
 
 
 def hunt_prompt(
@@ -132,13 +132,12 @@ def dedupe_prompt() -> str:
     return _render("dedupe")
 
 
-def gapfill_prompt() -> str:
-    return _render("gapfill")
+def consolidate_prompt(output_dir: Path, *, prior_runs_path: str = "") -> str | None:
+    """Build the consolidation prompt, or None if dedupe didn't produce output.
 
-
-def consolidate_prompt(output_dir: Path) -> str | None:
-    """Build the consolidation prompt, or None if dedupe didn't produce output."""
+    ``prior_runs_path`` is the absolute path of ``runs/`` (empty for first run).
+    """
     findings_path = output_dir / "dedupe" / "FINDINGS.md"
     if not findings_path.exists():
         return None
-    return _render("consolidate")
+    return _render("consolidate", prior_runs_path=prior_runs_path)

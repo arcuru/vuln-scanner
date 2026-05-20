@@ -13,11 +13,11 @@ Reports have been copied into the `reports/` directory:
 
 ## Task
 
-1. Read all VERIFICATION.md files. Only consider findings with verdict
-   CONFIRMED or NEEDS-REVIEW. Skip REJECTED findings.
+1. Read all VERIFICATION.md files. Sort by verdict: CONFIRMED, NEEDS-REVIEW,
+   REJECTED.
 
-2. For each confirmed finding, read the corresponding FINDING.md for full
-   details, PoC, and root cause analysis.
+2. For each CONFIRMED or NEEDS-REVIEW finding, read the corresponding
+   FINDING.md for full details, PoC, and root cause analysis.
 
 3. **Group by root cause.** Findings that share the same underlying flaw
    (e.g. the same unsanitized SQL query reached from different call sites,
@@ -29,9 +29,10 @@ Reports have been copied into the `reports/` directory:
    findings, but don't inflate. A single CRITICAL merged with two LOWs is
    still CRITICAL.
 
-5. **Identify coverage gaps for gapfill.** For each scope that was scanned,
-   note which attack classes WEREN'T checked but COULD apply. This will feed
-   the gapfill phase.
+5. **Record REJECTED investigations** in their own section so future
+   continuation runs can see what's already been investigated and ruled out.
+   One line per rejected task, including the attack class, scope, and a brief
+   reason for rejection.
 
 ## Output
 
@@ -68,18 +69,15 @@ Write FINDINGS.md in the repo root with this exact structure:
 ### VULN-002: ...
 ```
 
-## Coverage Gaps
+## Rejected Investigations
 
-The following (attack_class × scope) combinations were NOT covered but may be
-worth investigating:
+Tasks that were investigated and rejected (so future continuation runs can see
+what's already been ruled out):
 
-- **`<attack_class>` in `<scope>`** — <why this might be worth checking>
+- `<attack_class>` × `<scope>` (task `<task-id>`) — <one-line reason>
 - ...
-
-If there are no meaningful gaps, write "None identified — all high-priority
-combinations were covered."
 ```
 
 Sort vulnerabilities by severity (CRITICAL first). Be precise — every file:line
-reference must be verifiable. This report will be read by both humans and the
-gapfill agent, so follow the format exactly.
+reference must be verifiable. Follow the format exactly — this report is read
+by both humans and the next run's recon agent.
