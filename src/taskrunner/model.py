@@ -44,6 +44,7 @@ class Task:
                       not a scheduling dependency -- use depends_on for that.
         status:       Current status -- managed by the runner.
         error:        Error message if status is FAILED.
+        timeout:      Maximum seconds for this task (None = use runner default).
     """
 
     id: str
@@ -56,6 +57,7 @@ class Task:
     parent_task: str | None = None
     status: TaskStatus = TaskStatus.PENDING
     error: str | None = None
+    timeout: int | None = None
 
 
 @dataclass
@@ -89,7 +91,7 @@ class RunContext:
     work_dir: Path
     output_dir: Path
     log_path: Path
-    log_file: IO[str]
+    log_file: IO[bytes]
     phase_name: str
     all_outputs: dict[str, dict[str, dict[str, Path]]]
     runner: TaskRunner
@@ -100,9 +102,12 @@ class RunContext:
     def print(self, *args: Any, **kwargs: Any) -> None:
         """Print to the task's log file (not stdout).
 
-        Same signature as builtin print().
+        Writes UTF-8 encoded text. Same signature as builtin print().
         """
-        print(*args, file=self.log_file, **kwargs)
+        text = " ".join(str(a) for a in args)
+        end = kwargs.get("end", "\n")
+        self.log_file.write((text + end).encode("utf-8"))
+        self.log_file.flush()
 
     def subprocess_args(self) -> dict[str, Any]:
         """Common kwargs for subprocess.Popen/run to capture output to the log.
@@ -150,6 +155,7 @@ class Phase:
         description: str,
         worker: Callable[[Task, RunContext], bool],
         output: str = "SUMMARY.md",
+        timeout: int | None = None,
     ) -> Phase:
         """Create a consolidation phase (single task that reads all prior outputs)."""
         task = Task(
@@ -157,6 +163,7 @@ class Phase:
             description=description,
             worker=worker,
             outputs={"summary": output},
+            timeout=timeout,
         )
         return cls(name=name, tasks=[task], consolidation=True)
 

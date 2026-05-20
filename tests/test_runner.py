@@ -276,6 +276,7 @@ class TestRunGraphResumability:
         ))
         # Pre-create the output
         (tmp_path / "report.txt").write_text("already done")
+        (tmp_path / "a.done").write_text("")
 
         runner = TaskRunner(jobs=4, output_dir=tmp_path)
         result = runner.run_graph(g)

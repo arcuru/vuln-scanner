@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
+import re
 
 from taskrunner import Task
 from taskrunner.core import RunContext
@@ -20,10 +21,18 @@ def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProce
 
 
 def slugify(path: str) -> str:
+    """Convert a string into a git-ref-safe branch name component."""
+    # Replace any path separator with dash
     slug = path.replace("/", "-").replace("\\", "-")
-    # Strip leading dots/dashes
-    while slug and slug[0] in ".-":
-        slug = slug[1:]
+    # Replace characters forbidden in git refs: space ~ ^ : ? * [ \
+    slug = re.sub(r"[ ~^:?*\[\]\\]", "-", slug)
+    # Collapse consecutive dashes
+    slug = re.sub(r"-{2,}", "-", slug)
+    # Strip leading/trailing dots and dashes
+    slug = slug.strip(".-")
+    # Clamp length (git branch names have practical limit ~250 chars)
+    if len(slug) > 200:
+        slug = slug[:200]
     return slug
 
 
@@ -95,7 +104,7 @@ class WorktreeSetup:
             for task_id, outputs in tasks.items():
                 for _name, path in outputs.items():
                     if path.exists():
-                        dest = reports_dir / prev_phase / path.name
+                        dest = reports_dir / prev_phase / task_id / path.name
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(path, dest)
 

@@ -57,6 +57,7 @@ class TaskRunner:
         # Process tracking for graceful shutdown
         self._active_processes: set[subprocess.Popen[Any]] = set()
         self._process_lock = threading.Lock()
+        self._outputs_lock = threading.Lock()
         self._executor: ThreadPoolExecutor | None = None
         self._interrupted = False
 
@@ -102,6 +103,7 @@ class TaskRunner:
         old_sigterm = signal.getsignal(signal.SIGTERM)
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+        self._interrupted = False
 
         try:
             for phase in pipeline.phases:
@@ -137,7 +139,8 @@ class TaskRunner:
         logs_dir = self.output_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
 
-        self._all_outputs.setdefault(phase.name, {})
+        with self._outputs_lock:
+            self._all_outputs.setdefault(phase.name, {})
 
         completed = 0
         failed = 0
@@ -186,7 +189,7 @@ class TaskRunner:
                                 description=f"[dim]SKIP {task.description}[/dim]",
                             )
                             progress.remove_task(tid)
-                            self._register_outputs(task, phase_output)
+                            self._register_outputs(task, phase_output, phase.name)
                         continue
 
                     future = executor.submit(
@@ -263,7 +266,7 @@ class TaskRunner:
 
         log_path = logs_dir / f"{task.id}.log"
 
-        with open(log_path, "a") as log_file:
+        with open(log_path, "ab") as log_file:
             ctx = RunContext(
                 task=task,
                 work_dir=work_dir,
@@ -285,7 +288,7 @@ class TaskRunner:
 
         if success:
             task.status = TaskStatus.COMPLETED
-            self._register_outputs(task, phase_output)
+            self._register_outputs(task, phase_output, phase.name)
         else:
             task.status = TaskStatus.FAILED
 
@@ -336,6 +339,7 @@ class TaskRunner:
         old_sigterm = signal.getsignal(signal.SIGTERM)
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+        self._interrupted = False
 
         progress = self._make_progress()
 
@@ -419,7 +423,7 @@ class TaskRunner:
                                 pending.discard(task.id)
                                 skipped_ids.add(task.id)
                                 ready.remove(task)
-                                self._register_outputs(task, output_dir)
+                                self._register_outputs(task, output_dir, task.metadata.get("_phase", "__graph__"))
                                 with lock:
                                     pid = task_progress_ids[task.id]
                                     progress.update(
@@ -556,7 +560,7 @@ class TaskRunner:
 
         log_path = logs_dir / f"{task.id}.log"
 
-        with open(log_path, "a") as log_file:
+        with open(log_path, "ab") as log_file:
             ctx = RunContext(
                 task=task,
                 work_dir=work_dir,
@@ -579,7 +583,7 @@ class TaskRunner:
 
         if success:
             task.status = TaskStatus.COMPLETED
-            self._register_outputs(task, output_dir)
+            self._register_outputs(task, output_dir, phase_name)
         else:
             task.status = TaskStatus.FAILED
 
@@ -616,18 +620,26 @@ class TaskRunner:
         """Check if all declared outputs already exist (for resumability)."""
         if not task.outputs:
             return False
+        sentinel = output_dir / f"{task.id}.done"
+        if not sentinel.exists():
+            return False
         return all(
             (output_dir / path).exists()
             for path in task.outputs.values()
         )
 
-    def _register_outputs(self, task: Task, output_dir: Path) -> None:
+    def _register_outputs(self, task: Task, output_dir: Path, phase_name: str) -> None:
         """Record resolved output paths for downstream phases/tasks."""
-        phase_name = task.metadata.get("_phase", output_dir.name)
-        self._all_outputs.setdefault(phase_name, {})[task.id] = {
-            name: output_dir / path
-            for name, path in task.outputs.items()
-        }
+        with self._outputs_lock:
+            self._all_outputs.setdefault(phase_name, {})[task.id] = {
+                name: output_dir / path
+                for name, path in task.outputs.items()
+            }
+        # Write sentinel so resumability trusts outputs are complete
+        try:
+            (output_dir / f"{task.id}.done").write_text("")
+        except OSError:
+            pass
 
     # -------------------------------------------------------------------
     # Process management + signal handling
@@ -635,6 +647,8 @@ class TaskRunner:
 
     def _signal_handler(self, signum: int, frame: Any) -> None:
         """Handle SIGINT/SIGTERM gracefully."""
+        if self._interrupted:
+            return  # Already handling an interrupt
         self._interrupted = True
         self.console.print("\n[yellow]Interrupted — cleaning up...[/yellow]")
         self._kill_active_processes()
@@ -646,36 +660,43 @@ class TaskRunner:
         raise KeyboardInterrupt()
 
     def _kill_active_processes(self) -> None:
-        """Terminate all registered subprocesses."""
+        """Terminate all registered subprocesses.
+
+        Snapshots the active process set outside the lock to avoid
+        deadlock if the signal arrives while another thread holds _process_lock.
+        """
         import os
 
+        # Snapshot under lock, then kill outside
         with self._process_lock:
-            for proc in list(self._active_processes):
-                try:
-                    if proc.poll() is not None:
-                        continue
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                    except (ProcessLookupError, PermissionError):
-                        proc.terminate()
-
-                    try:
-                        proc.wait(timeout=0.5)
-                    except subprocess.TimeoutExpired:
-                        try:
-                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                        except (ProcessLookupError, PermissionError):
-                            proc.kill()
-
-                    for pipe in (proc.stdin, proc.stdout, proc.stderr):
-                        if pipe:
-                            try:
-                                pipe.close()
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
+            procs = list(self._active_processes)
             self._active_processes.clear()
+
+        for proc in procs:
+            try:
+                if proc.poll() is not None:
+                    continue
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    proc.terminate()
+
+                try:
+                    proc.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        proc.kill()
+
+                for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                    if pipe:
+                        try:
+                            pipe.close()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
     # -------------------------------------------------------------------
     # Summary
