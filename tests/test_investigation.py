@@ -14,6 +14,8 @@ from vuln_scanner.investigation import (
     LockHeld,
     Manifest,
     RunManifest,
+    copy_transcript,
+    find_claude_transcript,
     investigation_lock,
     is_investigation_dir,
     iso_now,
@@ -21,6 +23,7 @@ from vuln_scanner.investigation import (
     list_runs,
     make_run_id,
     update_summary_symlink,
+    write_task_toml,
 )
 
 # ---------------------------------------------------------------------------
@@ -177,10 +180,13 @@ class TestListRuns:
 
 
 class TestUpdateSummarySymlink:
+    def _make_run_with_summary(self, run_dir: Path, body: str) -> None:
+        (run_dir / "consolidate").mkdir(parents=True)
+        (run_dir / "consolidate" / "SUMMARY.md").write_text(body)
+
     def test_creates_symlink(self, tmp_path):
         run_dir = tmp_path / "runs" / "r1"
-        run_dir.mkdir(parents=True)
-        (run_dir / "SUMMARY.md").write_text("# hello")
+        self._make_run_with_summary(run_dir, "# hello")
         update_summary_symlink(tmp_path, run_dir)
         link = tmp_path / "SUMMARY.md"
         assert link.is_symlink()
@@ -188,8 +194,7 @@ class TestUpdateSummarySymlink:
 
     def test_relative_target(self, tmp_path):
         run_dir = tmp_path / "runs" / "r1"
-        run_dir.mkdir(parents=True)
-        (run_dir / "SUMMARY.md").write_text("# x")
+        self._make_run_with_summary(run_dir, "# x")
         update_summary_symlink(tmp_path, run_dir)
         # Target should be relative so the investigation folder is portable
         link = tmp_path / "SUMMARY.md"
@@ -199,8 +204,7 @@ class TestUpdateSummarySymlink:
         r1 = tmp_path / "runs" / "r1"
         r2 = tmp_path / "runs" / "r2"
         for r, body in ((r1, "first"), (r2, "second")):
-            r.mkdir(parents=True)
-            (r / "SUMMARY.md").write_text(body)
+            self._make_run_with_summary(r, body)
         update_summary_symlink(tmp_path, r1)
         update_summary_symlink(tmp_path, r2)
         assert (tmp_path / "SUMMARY.md").read_text() == "second"
@@ -247,3 +251,86 @@ class TestLock:
     def test_lockfile_created(self, tmp_path):
         with investigation_lock(tmp_path):
             assert (tmp_path / investigation.LOCKFILE_NAME).exists()
+
+
+# ---------------------------------------------------------------------------
+# Per-task metadata
+# ---------------------------------------------------------------------------
+
+
+class TestWriteTaskToml:
+    def test_scalars_round_trip(self, tmp_path):
+        import tomllib
+        p = tmp_path / "task.toml"
+        write_task_toml(p, {
+            "task_id": "hunt-x",
+            "phase": "hunt",
+            "session_id": "abc-123",
+            "success": True,
+            "duration_ms": 1234,
+            "total_cost_usd": None,  # skipped
+        })
+        data = tomllib.loads(p.read_text())
+        assert data["task_id"] == "hunt-x"
+        assert data["success"] is True
+        assert data["duration_ms"] == 1234
+        assert "total_cost_usd" not in data
+
+    def test_nested_section(self, tmp_path):
+        import tomllib
+        p = tmp_path / "task.toml"
+        write_task_toml(p, {
+            "task_id": "t",
+            "agent": {"command": ["claude", "--session-id", "u", "-p", "hi"]},
+        })
+        data = tomllib.loads(p.read_text())
+        assert data["task_id"] == "t"
+        assert data["agent"]["command"] == [
+            "claude", "--session-id", "u", "-p", "hi",
+        ]
+
+    def test_escapes_quotes_and_backslashes(self, tmp_path):
+        import tomllib
+        p = tmp_path / "task.toml"
+        write_task_toml(p, {"prompt": 'a"b\\c'})
+        assert tomllib.loads(p.read_text())["prompt"] == 'a"b\\c'
+
+    def test_creates_parent_dirs(self, tmp_path):
+        p = tmp_path / "a" / "b" / "task.toml"
+        write_task_toml(p, {"task_id": "x"})
+        assert p.is_file()
+
+
+class TestTranscriptLookup:
+    def test_returns_none_when_no_projects_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert find_claude_transcript("nonexistent") is None
+
+    def test_finds_match_under_any_project(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        proj = tmp_path / ".claude" / "projects" / "-some-encoded-cwd"
+        proj.mkdir(parents=True)
+        sid = "11111111-1111-1111-1111-111111111111"
+        target = proj / f"{sid}.jsonl"
+        target.write_text("{}\n")
+        assert find_claude_transcript(sid) == target
+
+    def test_empty_session_id_returns_none(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert find_claude_transcript("") is None
+
+    def test_copy_transcript_copies_to_dest(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        proj = tmp_path / ".claude" / "projects" / "-cwd"
+        proj.mkdir(parents=True)
+        sid = "22222222-2222-2222-2222-222222222222"
+        (proj / f"{sid}.jsonl").write_text("hello\n")
+
+        dest = tmp_path / "out" / "transcripts" / "t.jsonl"
+        result = copy_transcript(sid, dest)
+        assert result == dest
+        assert dest.read_text() == "hello\n"
+
+    def test_copy_transcript_returns_none_when_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert copy_transcript("missing-id", tmp_path / "x.jsonl") is None

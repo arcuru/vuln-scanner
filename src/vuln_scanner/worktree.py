@@ -107,4 +107,18 @@ class WorktreeSetup:
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(path, dest)
 
+        # Also copy per-task task.toml provenance so the consolidator can
+        # surface tasks that failed (no FINDING.md / VERIFICATION.md was ever
+        # produced — outcome unknown, distinct from a "rejected" verdict).
+        run_dir = output_dir.parent
+        for task_toml in run_dir.glob("*/*/task.toml"):
+            # task_toml = <run_dir>/<phase>/<task_id>/task.toml
+            phase = task_toml.parent.parent.name
+            tid = task_toml.parent.name
+            if phase == phase_name:  # don't include ourselves
+                continue
+            dest = reports_dir / phase / tid / "task.toml"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(task_toml, dest)
+
         return worktree

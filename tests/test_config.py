@@ -390,6 +390,65 @@ class TestModelFor:
 # ---------------------------------------------------------------------------
 
 
+class TestDumpEffectiveToml:
+    def test_round_trips_through_loader(self, tmp_path):
+        """Snapshot then re-load — settings must survive the round trip."""
+        import tomllib
+
+        profile = _write_profile(tmp_path)
+        toml = tmp_path / "c.toml"
+        toml.write_text(textwrap.dedent(
+            f"""
+            attack_classes = ["sql_injection", "xss"]
+
+            [scan]
+            prompt_profile = "{profile}"
+            branch_prefix = "audit"
+            max_tasks = 7
+            task_timeout = 1200
+
+            [scan.task_timeouts]
+            hunt = 900
+
+            [agent]
+            backend = "pi"
+            flags = "--verbose"
+
+            [agent.models]
+            hunt = "model-x"
+
+            [output]
+            recon = "ARCH.json"
+
+            [files]
+            extensions = "py,rs"
+            exclude_dirs = ["target", "build"]
+            """
+        ).strip())
+        cfg = load_config(str(toml))
+
+        snapshot = cfg.dump_effective_toml()
+        data = tomllib.loads(snapshot)
+
+        assert data["attack_classes"] == ["sql_injection", "xss"]
+        assert data["scan"]["branch_prefix"] == "audit"
+        assert data["scan"]["max_tasks"] == 7
+        assert data["scan"]["task_timeout"] == 1200
+        assert data["scan"]["task_timeouts"] == {"hunt": 900}
+        assert data["agent"]["backend"] == "pi"
+        assert data["agent"]["flags"] == "--verbose"
+        assert data["agent"]["models"] == {"hunt": "model-x"}
+        assert data["output"]["recon"] == "ARCH.json"
+        assert data["files"]["extensions"] == "py,rs"
+        assert set(data["files"]["exclude_dirs"]) == {"target", "build"}
+
+    def test_omits_models_section_when_none_configured(self, tmp_path):
+        import tomllib
+        cfg = load_config(str(_write_profile(tmp_path)))
+        data = tomllib.loads(cfg.dump_effective_toml())
+        assert "models" not in data.get("agent", {})
+
+
 class TestConfigFromModule:
     def test_defaults_from_minimal_module(self, tmp_path):
         cfg = load_config(str(_write_profile(tmp_path)))

@@ -8,10 +8,13 @@ An investigation directory is one folder per scan target. It contains:
     worktrees/             ephemeral worktrees (gitignored)
     .vuln-scanner.lock     concurrency guard
     runs/<run-id>/         immutable per-run output
-        manifest.toml
-        recon/, hunt/, validate/, dedupe/
-        SUMMARY.md
-    SUMMARY.md             symlink to latest run's SUMMARY.md
+        manifest.toml      tool version, target SHA, status, summary counts
+        config.toml        effective config snapshot for this run
+        logs/              one log file per task (agent stdout / SDK stream)
+        transcripts/       full Claude transcripts keyed by task id
+        recon/, hunt/, validate/, dedupe/, consolidate/
+            <task-id>/task.toml   backend, model, session, timings, cost
+    SUMMARY.md             symlink to latest run's consolidate/SUMMARY.md
 
 This module owns the on-disk shape: manifest read/write, run-id generation,
 lockfile, symlink updates. It does NOT know about the pipeline or the agent.
@@ -20,15 +23,20 @@ lockfile, symlink updates. It does NOT know about the pipeline or the agent.
 from __future__ import annotations
 
 import fcntl
+import shutil
 import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 MANIFEST_NAME = "MANIFEST.toml"
 RUN_MANIFEST_NAME = "manifest.toml"
+RUN_CONFIG_NAME = "config.toml"
+TASK_TOML_NAME = "task.toml"
+TRANSCRIPTS_DIRNAME = "transcripts"
 LOCKFILE_NAME = ".vuln-scanner.lock"
 SUMMARY_NAME = "SUMMARY.md"
 CONFIG_NAME = "vuln-scanner.toml"
@@ -198,16 +206,102 @@ def latest_run(inv_dir: Path) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
+# Per-task metadata and transcript capture
+# ---------------------------------------------------------------------------
+
+
+def _toml_value(v: Any) -> str:
+    """Render a Python value as a TOML scalar/array.
+
+    Handles the subset of types we actually emit in task.toml: str, bool, int,
+    float, None (→ skipped by caller), and lists of strings.
+    """
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return repr(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(_toml_value(x) for x in v) + "]"
+    # Default: quote as string. Escape backslashes and double-quotes only —
+    # task.toml values come from program-controlled sources (paths, model IDs,
+    # UUIDs), not user input, so this is sufficient.
+    s = str(v).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{s}"'
+
+
+def write_task_toml(path: Path, data: dict[str, Any]) -> None:
+    """Write a per-task metadata file at ``path``.
+
+    ``data`` may contain nested dicts (rendered as `[section]` headers).
+    ``None`` values are skipped.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    # Top-level scalars first, then nested tables
+    top = {k: v for k, v in data.items() if not isinstance(v, dict)}
+    nested = {k: v for k, v in data.items() if isinstance(v, dict)}
+    for k, v in top.items():
+        if v is None:
+            continue
+        lines.append(f"{k} = {_toml_value(v)}")
+    for section, body in nested.items():
+        if not body:
+            continue
+        lines.append("")
+        lines.append(f"[{section}]")
+        for k, v in body.items():
+            if v is None:
+                continue
+            lines.append(f"{k} = {_toml_value(v)}")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def find_claude_transcript(session_id: str) -> Path | None:
+    """Locate ``~/.claude/projects/*/<session_id>.jsonl``.
+
+    Returns the most recently modified match (Claude Code writes one transcript
+    file per session under a project-encoded directory). Returns ``None`` if
+    no match is found.
+    """
+    if not session_id:
+        return None
+    base = Path.home() / ".claude" / "projects"
+    if not base.is_dir():
+        return None
+    matches = list(base.glob(f"*/{session_id}.jsonl"))
+    if not matches:
+        return None
+    return max(matches, key=lambda p: p.stat().st_mtime)
+
+
+def copy_transcript(session_id: str, dest: Path) -> Path | None:
+    """Copy the Claude transcript for ``session_id`` into ``dest``.
+
+    Returns the destination path on success, ``None`` if the source can't be
+    found. Idempotent — overwrites any existing destination file.
+    """
+    src = find_claude_transcript(session_id)
+    if src is None:
+        return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    return dest
+
+
+# ---------------------------------------------------------------------------
 # SUMMARY.md symlink
 # ---------------------------------------------------------------------------
 
 
 def update_summary_symlink(inv_dir: Path, run_dir: Path) -> None:
-    """Point ``<inv_dir>/SUMMARY.md`` at ``<run_dir>/SUMMARY.md``.
+    """Point ``<inv_dir>/SUMMARY.md`` at the run's consolidated summary.
 
-    No-op if the run hasn't produced a SUMMARY.md yet.
+    The consolidate phase writes ``<run_dir>/consolidate/SUMMARY.md``. No-op
+    if the run hasn't produced one yet (e.g. interrupted before consolidate).
     """
-    src = run_dir / SUMMARY_NAME
+    src = run_dir / "consolidate" / SUMMARY_NAME
     if not src.is_file():
         return
     link = inv_dir / SUMMARY_NAME

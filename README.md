@@ -57,6 +57,29 @@ uv run vuln-scanner status
 The investigation folder is self-contained. Move it, archive it, commit it to
 its own git repo — it stays consistent.
 
+## Scan archive
+
+This repo doubles as a running archive of scans, under [`scans/`](scans/). Each
+subfolder is one investigation directory: config + manifest + per-run output.
+The cloned target and ephemeral worktrees are gitignored, so what's committed
+is just the audit trail.
+
+| Target | Source |
+|---|---|
+| [`cmprss`](scans/cmprss/) | <https://github.com/arcuru/cmprss> |
+
+From the repo root, scan an existing target or add a new one:
+
+```bash
+# Run a scan against a target (anywhere in the tree)
+vuln-scanner run -C scans/cmprss -j 8
+
+# Add a new target
+mkdir scans/<name> && cd scans/<name>
+vuln-scanner init https://github.com/owner/repo
+vuln-scanner run -j 8
+```
+
 ## CLI reference
 
 ```text
@@ -83,16 +106,20 @@ options:
                        minimal built-in)
 
 $ vuln-scanner run --help
-usage: vuln-scanner run [-h] [--sha SHA] [-j JOBS] [-v]
+usage: vuln-scanner run [-h] [-C DIR] [--sha SHA] [-j JOBS] [-v]
 
 options:
+  -C, --dir DIR    Investigation directory to operate on (default: cwd)
   --sha SHA        Target commit SHA to pin (default: keep current target
                    HEAD)
   -j, --jobs JOBS  Parallel workers (default: 4)
   -v, --verbose
 
 $ vuln-scanner status --help
-usage: vuln-scanner status [-h]
+usage: vuln-scanner status [-h] [-C DIR]
+
+options:
+  -C, --dir DIR  Investigation directory to operate on (default: cwd)
 ```
 
 ## Investigation directory
@@ -109,14 +136,31 @@ my-investigation/
   .vuln-scanner.lock           # concurrency guard
   runs/
     2026-05-20T14-30-abc1234/  # ISO timestamp + short target SHA
-      manifest.toml            # tool version, models used, target SHA, status
-      recon/HUNT_QUEUE.json
-      hunt/<task-id>/FINDING.md
-      validate/<task-id>/VERIFICATION.md
+      manifest.toml            # tool version, target SHA, status, summary
+      config.toml              # effective config snapshot for this run
+      logs/<task-id>.log       # agent stdout (or SDK event stream)
+      transcripts/<task-id>.jsonl  # full Claude transcript per task
+      recon/
+        HUNT_QUEUE.json
+        task.toml              # backend, model, session_id, timings
+      hunt/<task-id>/
+        FINDING.md
+        task.toml
+      validate/<task-id>/
+        VERIFICATION.md
+        task.toml
       dedupe/FINDINGS.md
-      SUMMARY.md               # cumulative across all runs
-  SUMMARY.md  →  runs/<latest>/SUMMARY.md
+      consolidate/
+        SUMMARY.md             # cumulative across all runs
+        task.toml
+  SUMMARY.md  →  runs/<latest>/consolidate/SUMMARY.md
 ```
+
+Each run directory is self-describing: `config.toml` is the resolved view of
+`vuln-scanner.toml` at run time, and per-task `task.toml` records the exact
+backend invocation (argv or SDK options), session UUID, model used, duration,
+and cost. The matching `transcripts/<task-id>.jsonl` is the full Claude
+session log copied out of `~/.claude/projects/`.
 
 The `.gitignore` written by `init` covers `target/`, `worktrees/`, and the
 lockfile — so you can run `git init` in the investigation folder and track
@@ -136,11 +180,14 @@ artifacts per task:
 3. **validate** — fan-out from hunt tasks. Adversarial review of each finding.
    Produces `VERIFICATION.md` per task.
 4. **dedupe** — one task. Groups confirmed findings by root cause, records
-   rejected investigations so future recon can skip them. Produces
-   `FINDINGS.md`.
+   rejected investigations so future recon can skip them, and records *failed*
+   investigations (tasks where the agent crashed or timed out before
+   producing output — outcome unknown, codepath NOT cleared) so future runs
+   re-attempt them. Produces `FINDINGS.md`.
 5. **consolidate** — one task. Produces the cumulative `SUMMARY.md` with each
    finding tagged **NEW** / **PERSISTS** / **FIXED** / **REGRESSED** relative
-   to prior runs.
+   to prior runs, and a "Failed Investigations" section listing this run's
+   unknown-outcome tasks.
 
 Each run resumes from `.done` sentinels — if interrupted, re-running `run`
 (without `--sha`) picks up where it left off in the same run directory.
@@ -202,7 +249,7 @@ backend = "claude"
 # validate = "claude-opus-4-7"
 ```
 
-See [`config.example.toml`](config.example.toml) for the full set of options
+See [`vuln-scanner.example.toml`](vuln-scanner.example.toml) for the full set of options
 with comments. Key sections:
 
 | Section | Purpose |
@@ -218,8 +265,16 @@ with comments. Key sections:
 
 ### Backends
 
-Built-in backends: `claude` (Claude Code CLI) and `pi` (Oh My Pi). Set via
-`[agent] backend = "..."`.
+Built-in backends:
+
+- `claude` — subprocesses the Claude Code CLI (`claude -p`); default.
+- `claude-sdk` — uses the in-process [`claude-agent-sdk`](https://pypi.org/project/claude-agent-sdk/)
+  Python library. Same model and tools as `claude`, but streams structured
+  events (assistant turns, tool calls, the final `ResultMessage` with token
+  and cost info) into the per-task log file.
+- `pi` — Oh My Pi agent CLI.
+
+Set via `[agent] backend = "..."`.
 
 Custom backends can be defined directly in TOML — no Python code needed:
 

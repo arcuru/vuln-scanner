@@ -151,6 +151,29 @@ class TestCmdStatus:
         assert str(origin) in out
         assert "No runs yet" in out
 
+    def test_dir_flag_targets_other_directory(self, tmp_path, capsys, monkeypatch):
+        """--dir/-C lets status operate on an investigation outside cwd."""
+        origin = tmp_path / "origin"
+        _init_origin(origin)
+
+        inv = tmp_path / "inv"
+        inv.mkdir()
+        monkeypatch.chdir(inv)
+        cli.cmd_init(argparse.Namespace(target_url=str(origin), config=None))
+
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+
+        cli.cmd_status(argparse.Namespace(dir=str(inv)))
+        out = capsys.readouterr().out
+        assert str(origin) in out
+        assert "No runs yet" in out
+
+    def test_dir_flag_rejects_missing_path(self, cwd, capsys):
+        with pytest.raises(SystemExit):
+            cli.cmd_status(argparse.Namespace(dir=str(cwd / "does-not-exist")))
+
     def test_lists_runs(self, cwd, tmp_path, capsys, monkeypatch):
         # Rich truncates the run-id column under a narrow terminal; force a
         # wide one so the full ID appears in captured output.
@@ -199,11 +222,14 @@ class TestSummaryCountsParsing:
             "# Deduplicated Findings\n"
             "## Scan Summary\n"
             "- **Total hunt tasks:** 20\n"
-            "- **Confirmed:** 3 | **Rejected:** 12 | **Needs review:** 1\n"
+            "- **Confirmed:** 3 | **Rejected:** 12 | **Needs review:** 1 | **Failed:** 2\n"
             "- **Unique vulnerabilities:** 2\n"
         )
         counts = cli._summary_counts_from_findings(findings)
-        assert counts == {"confirmed": 3, "rejected": 12, "needs_review": 1, "unique_vulns": 2}
+        assert counts == {
+            "confirmed": 3, "rejected": 12, "needs_review": 1,
+            "failed": 2, "unique_vulns": 2,
+        }
 
     def test_partial_summary(self, tmp_path):
         findings = tmp_path / "FINDINGS.md"
@@ -217,6 +243,31 @@ class TestSummaryCountsParsing:
         findings = tmp_path / "FINDINGS.md"
         findings.write_text("# no counts here\n")
         assert cli._summary_counts_from_findings(findings) == {}
+
+
+class TestCountFailedTasks:
+    def _write_task_toml(self, path: Path, success: bool) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'task_id = "x"\nsuccess = {str(success).lower()}\n')
+
+    def test_counts_only_failures(self, tmp_path):
+        self._write_task_toml(tmp_path / "hunt" / "a" / "task.toml", success=True)
+        self._write_task_toml(tmp_path / "hunt" / "b" / "task.toml", success=False)
+        self._write_task_toml(tmp_path / "validate" / "c" / "task.toml", success=False)
+        assert cli._count_failed_tasks(tmp_path) == 2
+
+    def test_zero_when_all_succeed(self, tmp_path):
+        self._write_task_toml(tmp_path / "hunt" / "a" / "task.toml", success=True)
+        assert cli._count_failed_tasks(tmp_path) == 0
+
+    def test_zero_when_no_task_tomls(self, tmp_path):
+        assert cli._count_failed_tasks(tmp_path) == 0
+
+    def test_skips_unparseable(self, tmp_path):
+        (tmp_path / "hunt" / "a").mkdir(parents=True)
+        (tmp_path / "hunt" / "a" / "task.toml").write_text("not = valid = toml")
+        self._write_task_toml(tmp_path / "hunt" / "b" / "task.toml", success=False)
+        assert cli._count_failed_tasks(tmp_path) == 1
 
 
 # ---------------------------------------------------------------------------

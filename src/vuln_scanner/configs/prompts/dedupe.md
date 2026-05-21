@@ -10,6 +10,10 @@ $environment
 Reports have been copied into the `reports/` directory:
 - `reports/hunt/<task_id>/FINDING.md` — hunter's original findings
 - `reports/validate/<task_id>/VERIFICATION.md` — adversarial validation results
+- `reports/hunt/<task_id>/task.toml` and `reports/validate/<task_id>/task.toml`
+  — per-task provenance. `success = false` means the agent failed to produce
+  its output (API error, timeout, crash) — the task's result is UNKNOWN,
+  *not* rejected.
 
 ## Task
 
@@ -34,6 +38,16 @@ Reports have been copied into the `reports/` directory:
    One line per rejected task, including the attack class, scope, and a brief
    reason for rejection.
 
+6. **Record FAILED investigations** in their own section. Walk every
+   `reports/*/<task_id>/task.toml` and identify tasks with `success = false`
+   (or hunt tasks whose `reports/hunt/<task_id>/FINDING.md` is missing
+   despite an attempt). These represent tasks where the agent did not finish
+   — the outcome is unknown, the codepath was *not* cleared, and a future
+   continuation run should re-attempt them. Distinct from REJECTED, which
+   means "investigated and ruled out". For each failed task, record
+   attack_class, scope, the phase that failed (hunt or validate), and the
+   approximate duration (from started_at / finished_at).
+
 ## Output
 
 Write FINDINGS.md in the repo root with this exact structure:
@@ -43,7 +57,7 @@ Write FINDINGS.md in the repo root with this exact structure:
 
 ## Scan Summary
 - **Total hunt tasks:** <N>
-- **Confirmed:** <N> | **Rejected:** <N> | **Needs review:** <N>
+- **Confirmed:** <N> | **Rejected:** <N> | **Needs review:** <N> | **Failed:** <N>
 - **Unique vulnerabilities:** <N>
 - **Severity:** CRITICAL <N>, HIGH <N>, MEDIUM <N>, LOW <N>
 
@@ -76,8 +90,20 @@ what's already been ruled out):
 
 - `<attack_class>` × `<scope>` (task `<task-id>`) — <one-line reason>
 - ...
+
+## Failed Investigations
+
+Tasks the agent attempted but did not finish — outcome is UNKNOWN, the
+codepath was NOT cleared. A continuation run should re-attempt these.
+
+- `<attack_class>` × `<scope>` (task `<task-id>`, phase `<hunt|validate>`,
+  ran ~<duration>) — result unknown (agent did not produce output)
+- ...
 ```
 
 Sort vulnerabilities by severity (CRITICAL first). Be precise — every file:line
 reference must be verifiable. Follow the format exactly — this report is read
 by both humans and the next run's recon agent.
+
+Omit "Failed Investigations" entirely if there are no failed tasks; same for
+"Rejected Investigations".

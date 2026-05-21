@@ -1,0 +1,3 @@
+[submodule "scans"]
+	path = scans
+	url = https://github.com/arcuru/vuln-scans.git

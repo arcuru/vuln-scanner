@@ -50,6 +50,9 @@ class Config:
     """
 
     def __init__(self, mod: ModuleType) -> None:
+        # Prompt profile (set by loader; useful for snapshotting effective config)
+        self.prompt_profile: str = getattr(mod, "__name__", "")
+
         # Agent
         self.agent: str = getattr(mod, "AGENT", "claude")
         self.agent_flags: str = getattr(mod, "AGENT_FLAGS", "")
@@ -148,6 +151,64 @@ class Config:
         """Return the configured model for a phase (None = backend default)."""
         return getattr(self, f"{phase}_model", None)
 
+    def dump_effective_toml(self) -> str:
+        """Render the effective settings as TOML for snapshotting into a run dir.
+
+        Captures everything that influenced the run except the prompt callables
+        themselves (which can't round-trip through TOML). The ``prompt_profile``
+        field records which profile module was loaded, so a future reader can
+        re-load the same prompts.
+        """
+        lines: list[str] = [
+            "# Effective configuration snapshot — written at run start.",
+            "# This is the resolved view of vuln-scanner.toml + profile defaults",
+            "# as the run actually used them. Edit the source config instead of",
+            "# this file; rewriting this won't replay the run.",
+            "",
+            "attack_classes = [",
+            *(f'    "{c}",' for c in self.attack_classes),
+            "]",
+            "",
+            "[scan]",
+            f'prompt_profile = "{self.prompt_profile}"',
+            f'branch_prefix = "{self.branch_prefix}"',
+            f"max_tasks = {int(self.max_tasks)}",
+            f"task_timeout = {int(self.task_timeout)}",
+        ]
+        if self.task_timeouts:
+            lines.append("")
+            lines.append("[scan.task_timeouts]")
+            for phase, secs in self.task_timeouts.items():
+                lines.append(f"{phase} = {int(secs)}")
+
+        lines.append("")
+        lines.append("[agent]")
+        lines.append(f'backend = "{self.agent}"')
+        lines.append(f'flags = "{self.agent_flags}"')
+
+        models = {p: self.model_for(p) for p in _PHASES if self.model_for(p)}
+        if models:
+            lines.append("")
+            lines.append("[agent.models]")
+            for phase, model in models.items():
+                lines.append(f'{phase} = "{model}"')
+
+        lines.append("")
+        lines.append("[output]")
+        lines.append(f'recon       = "{self.recon_output}"')
+        lines.append(f'hunt        = "{self.hunt_output}"')
+        lines.append(f'validate    = "{self.validate_output}"')
+        lines.append(f'dedupe      = "{self.dedupe_output}"')
+        lines.append(f'consolidate = "{self.consolidate_output}"')
+
+        lines.append("")
+        lines.append("[files]")
+        lines.append(f'extensions = "{self.extensions}"')
+        exclude_str = ", ".join(f'"{d}"' for d in sorted(self.exclude_dirs))
+        lines.append(f"exclude_dirs = [{exclude_str}]")
+
+        return "\n".join(lines) + "\n"
+
 
 # ---------------------------------------------------------------------------
 # Loading
@@ -182,6 +243,7 @@ def _load_toml_config(toml_path: Path) -> Config:
 
     # Build Config from profile, then overlay TOML values
     cfg = Config(mod)
+    cfg.prompt_profile = profile_name
     # Validate required prompt functions
     for attr in ("recon_prompt", "hunt_prompt", "validate_prompt"):
         if not hasattr(mod, attr):
@@ -281,4 +343,6 @@ def _load_python_config(name_or_path: str) -> Config:
             logger.error(f"Config must define {attr}()")
             sys.exit(1)
 
-    return Config(mod)
+    cfg = Config(mod)
+    cfg.prompt_profile = name_or_path
+    return cfg

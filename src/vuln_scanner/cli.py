@@ -22,11 +22,14 @@ import argparse
 import importlib.metadata
 import json
 import logging
+import os
 import re
 import shutil
 import sys
+import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 from rich.table import Table
@@ -34,17 +37,22 @@ from rich.table import Table
 from taskrunner import Phase, Pipeline, SetupCallbacks, Task, TaskRunner, TaskStatus
 from taskrunner.model import RunContext
 from vuln_scanner import investigation, target
-from vuln_scanner.claude import run_agent
+from vuln_scanner.claude import RunResult, run_agent
 from vuln_scanner.config import Config, load_config
 from vuln_scanner.investigation import (
     CONFIG_NAME,
+    RUN_CONFIG_NAME,
     RUNS_DIRNAME,
     SUMMARY_NAME,
     TARGET_DIRNAME,
+    TASK_TOML_NAME,
+    TRANSCRIPTS_DIRNAME,
     WORKTREES_DIRNAME,
     LockHeld,
     Manifest,
     RunManifest,
+    copy_transcript,
+    write_task_toml,
 )
 from vuln_scanner.worktree import WorktreeSetup, slugify
 
@@ -67,6 +75,95 @@ def _copy_task_outputs(ctx: RunContext, outputs: dict[str, str]) -> None:
             shutil.copy2(src, dest)
 
 
+def _task_metadata_dir(ctx: RunContext, task: Task) -> Path:
+    """Where to write per-task ``task.toml`` — alongside the task's outputs.
+
+    Fan-out tasks namespace their outputs under a subdir (hunt under
+    ``<task_id>/``, validate under the parent hunt's id); consolidation-style
+    phases (recon, dedupe, consolidate) write outputs directly in ``<phase>/``.
+    Mirror whichever shape the outputs use.
+    """
+    for rel in task.outputs.values():
+        parts = Path(rel).parts
+        if len(parts) > 1:
+            return ctx.output_dir / parts[0]
+    return ctx.output_dir
+
+
+def _run_agent_for_task(
+    ctx: RunContext,
+    task: Task,
+    cfg: Config,
+    *,
+    prompt: str,
+    phase: str,
+    model: str | None,
+    run_dir: Path,
+) -> RunResult:
+    """Run the agent for a single task and persist provenance.
+
+    Generates a session UUID, invokes the configured backend, then writes
+    ``task.toml`` (resolved command/options, session id, timings) and copies
+    the Claude transcript (if any) into ``runs/<run-id>/transcripts/``.
+
+    Workers should call this instead of ``run_agent`` directly so every task
+    gets the same provenance treatment.
+    """
+    session_id = str(uuid.uuid4())
+    started_at = investigation.iso_now()
+
+    result = run_agent(
+        ctx.work_dir, prompt, ctx.log_path, ctx,
+        agent=cfg.agent,
+        agent_flags=cfg.agent_flags,
+        model=model,
+        session_id=session_id,
+    )
+
+    finished_at = investigation.iso_now()
+
+    transcript_dest: Path | None = None
+    if result.session_id:
+        transcript_dest = copy_transcript(
+            result.session_id,
+            run_dir / TRANSCRIPTS_DIRNAME / f"{task.id}.jsonl",
+        )
+
+    log_path = (
+        str(ctx.log_path.relative_to(run_dir))
+        if ctx.log_path.is_relative_to(run_dir)
+        else str(ctx.log_path)
+    )
+    meta: dict[str, Any] = {
+        "task_id": task.id,
+        "phase": phase,
+        "attack_class": task.metadata.get("attack_class", ""),
+        "scope": task.metadata.get("scope", ""),
+        "backend": cfg.agent,
+        "model_requested": model or "",
+        "model_used": result.model_used or "",
+        "session_id": result.session_id or "",
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "success": result.success,
+        "duration_ms": result.duration_ms,
+        "total_cost_usd": result.total_cost_usd,
+        "num_turns": result.num_turns,
+        "log_path": log_path,
+    }
+    if transcript_dest:
+        meta["transcript_path"] = str(transcript_dest.relative_to(run_dir))
+    if result.command:
+        meta["agent"] = {"command": result.command}
+    elif result.sdk_options:
+        meta["agent"] = {
+            k: ("" if v is None else v) for k, v in result.sdk_options.items()
+        }
+
+    write_task_toml(_task_metadata_dir(ctx, task) / TASK_TOML_NAME, meta)
+    return result
+
+
 def _read_queue_summary(queue_path: Path) -> str:
     """Extract architecture_summary from a hunt queue JSON file."""
     try:
@@ -83,7 +180,7 @@ def _read_queue_summary(queue_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _make_recon_worker(cfg: Config, prior_runs_path: str):
+def _make_recon_worker(cfg: Config, prior_runs_path: str, run_dir: Path):
     """Recon worker: map architecture + produce HUNT_QUEUE.json.
 
     ``prior_runs_path`` is the absolute path of ``runs/`` (empty string for
@@ -92,9 +189,9 @@ def _make_recon_worker(cfg: Config, prior_runs_path: str):
 
     def worker(task: Task, ctx: RunContext) -> bool:
         prompt = cfg.recon_prompt(prior_runs_path=prior_runs_path)
-        ok = run_agent(
-            ctx.work_dir, prompt, ctx.log_path, ctx,
-            agent=cfg.agent, agent_flags=cfg.agent_flags, model=cfg.recon_model,
+        result = _run_agent_for_task(
+            ctx, task, cfg,
+            prompt=prompt, phase="recon", model=cfg.recon_model, run_dir=run_dir,
         )
 
         output_in_wt = ctx.work_dir / cfg.recon_output
@@ -102,7 +199,7 @@ def _make_recon_worker(cfg: Config, prior_runs_path: str):
             shutil.copy2(output_in_wt, ctx.output_dir / cfg.recon_output)
             return True
 
-        task.error = "agent exited non-zero" if not ok else (
+        task.error = "agent exited non-zero" if not result else (
             f"{cfg.recon_output} not written by recon agent"
         )
         return False
@@ -110,7 +207,7 @@ def _make_recon_worker(cfg: Config, prior_runs_path: str):
     return worker
 
 
-def _make_hunt_worker(cfg: Config):
+def _make_hunt_worker(cfg: Config, run_dir: Path):
     """Hunt worker: attack-class-scoped vulnerability search with PoC loop."""
 
     def worker(task: Task, ctx: RunContext) -> bool:
@@ -128,9 +225,9 @@ def _make_hunt_worker(cfg: Config):
             arch_summary=arch_summary,
         )
 
-        ok = run_agent(
-            ctx.work_dir, prompt, ctx.log_path, ctx,
-            agent=cfg.agent, agent_flags=cfg.agent_flags, model=cfg.hunt_model,
+        result = _run_agent_for_task(
+            ctx, task, cfg,
+            prompt=prompt, phase="hunt", model=cfg.hunt_model, run_dir=run_dir,
         )
 
         output_in_wt = ctx.work_dir / cfg.hunt_output
@@ -138,7 +235,7 @@ def _make_hunt_worker(cfg: Config):
             _copy_task_outputs(ctx, task.outputs)
             return True
 
-        task.error = "agent exited non-zero" if not ok else (
+        task.error = "agent exited non-zero" if not result else (
             f"{cfg.hunt_output} not written by hunt agent"
         )
         return False
@@ -146,14 +243,15 @@ def _make_hunt_worker(cfg: Config):
     return worker
 
 
-def _make_validate_worker(cfg: Config):
+def _make_validate_worker(cfg: Config, run_dir: Path):
     """Adversarial validate worker: disprove the hunter's finding."""
 
     def worker(task: Task, ctx: RunContext) -> bool:
         prompt = cfg.validate_prompt()
-        ok = run_agent(
-            ctx.work_dir, prompt, ctx.log_path, ctx,
-            agent=cfg.agent, agent_flags=cfg.agent_flags, model=cfg.validate_model,
+        result = _run_agent_for_task(
+            ctx, task, cfg,
+            prompt=prompt, phase="validate", model=cfg.validate_model,
+            run_dir=run_dir,
         )
 
         output_in_wt = ctx.work_dir / cfg.validate_output
@@ -161,7 +259,7 @@ def _make_validate_worker(cfg: Config):
             _copy_task_outputs(ctx, task.outputs)
             return True
 
-        task.error = "agent exited non-zero" if not ok else (
+        task.error = "agent exited non-zero" if not result else (
             f"{cfg.validate_output} not written by validate agent"
         )
         return False
@@ -169,7 +267,7 @@ def _make_validate_worker(cfg: Config):
     return worker
 
 
-def _make_dedupe_worker(cfg: Config):
+def _make_dedupe_worker(cfg: Config, run_dir: Path):
     """Dedupe worker: group validated findings by root cause."""
 
     def worker(task: Task, ctx: RunContext) -> bool:
@@ -178,9 +276,9 @@ def _make_dedupe_worker(cfg: Config):
             task.error = "dedupe_prompt returned None"
             return False
 
-        ok = run_agent(
-            ctx.work_dir, prompt, ctx.log_path, ctx,
-            agent=cfg.agent, agent_flags=cfg.agent_flags, model=cfg.dedupe_model,
+        result = _run_agent_for_task(
+            ctx, task, cfg,
+            prompt=prompt, phase="dedupe", model=cfg.dedupe_model, run_dir=run_dir,
         )
 
         output_in_wt = ctx.work_dir / cfg.dedupe_output
@@ -188,7 +286,7 @@ def _make_dedupe_worker(cfg: Config):
             shutil.copy2(output_in_wt, ctx.output_dir / cfg.dedupe_output)
             return True
 
-        task.error = "agent exited non-zero" if not ok else (
+        task.error = "agent exited non-zero" if not result else (
             f"{cfg.dedupe_output} not written by dedupe agent"
         )
         return False
@@ -196,21 +294,22 @@ def _make_dedupe_worker(cfg: Config):
     return worker
 
 
-def _make_consolidate_worker(cfg: Config, output_dir: Path, prior_runs_path: str):
+def _make_consolidate_worker(cfg: Config, run_dir: Path, prior_runs_path: str):
     """Consolidation worker: cumulative SUMMARY.md across all runs."""
 
     def worker(task: Task, ctx: RunContext) -> bool:
-        prompt = cfg.consolidate_prompt(output_dir, prior_runs_path=prior_runs_path)
+        prompt = cfg.consolidate_prompt(run_dir, prior_runs_path=prior_runs_path)
         if prompt is None:
             task.error = (
                 f"consolidate_prompt returned None "
-                f"(no dedupe output in {output_dir / 'dedupe'})"
+                f"(no dedupe output in {run_dir / 'dedupe'})"
             )
             return False
 
-        ok = run_agent(
-            ctx.work_dir, prompt, ctx.log_path, ctx,
-            agent=cfg.agent, agent_flags=cfg.agent_flags, model=cfg.consolidate_model,
+        result = _run_agent_for_task(
+            ctx, task, cfg,
+            prompt=prompt, phase="consolidate", model=cfg.consolidate_model,
+            run_dir=run_dir,
         )
 
         output_in_wt = ctx.work_dir / cfg.consolidate_output
@@ -218,7 +317,7 @@ def _make_consolidate_worker(cfg: Config, output_dir: Path, prior_runs_path: str
             shutil.copy2(output_in_wt, ctx.output_dir / cfg.consolidate_output)
             return True
 
-        task.error = "agent exited non-zero" if not ok else (
+        task.error = "agent exited non-zero" if not result else (
             f"{cfg.consolidate_output} not written by consolidate agent"
         )
         return False
@@ -246,14 +345,14 @@ def build_pipeline(
     recon_task = Task(
         id="recon",
         description="Recon — mapping architecture and attack surface",
-        worker=_make_recon_worker(cfg, prior_runs_path),
+        worker=_make_recon_worker(cfg, prior_runs_path, output_dir),
         outputs={"queue": cfg.recon_output},
         timeout=cfg.timeout_for("recon"),
     )
     phases.append(Phase.fan_out(name="recon", tasks=[recon_task]))
 
     # -- 2. Hunt (fan-out from recon's queue) --
-    hunt_worker = _make_hunt_worker(cfg)
+    hunt_worker = _make_hunt_worker(cfg, output_dir)
 
     def make_hunt_tasks(prev_tasks: list[Task]) -> list[Task]:
         return _tasks_from_queue(
@@ -269,7 +368,7 @@ def build_pipeline(
     phases.append(Phase.fan_out(name="hunt", tasks_from=make_hunt_tasks))
 
     # -- 3. Validate (fan-out from completed hunts) --
-    validate_worker = _make_validate_worker(cfg)
+    validate_worker = _make_validate_worker(cfg, output_dir)
 
     def make_validate_tasks(prev_tasks: list[Task]) -> list[Task]:
         return _make_validate_tasks_from(
@@ -284,7 +383,7 @@ def build_pipeline(
             Phase.consolidate(
                 name="dedupe",
                 description="Deduplicating findings by root cause",
-                worker=_make_dedupe_worker(cfg),
+                worker=_make_dedupe_worker(cfg, output_dir),
                 output=cfg.dedupe_output,
                 timeout=cfg.timeout_for("dedupe"),
             )
@@ -425,6 +524,36 @@ def _require_investigation_dir(console: Console) -> Path:
     return cwd
 
 
+def _chdir_if_requested(args: argparse.Namespace, console: Console) -> None:
+    """If ``--dir`` was passed, chdir into it before resolving the investigation."""
+    target_dir = getattr(args, "dir", None)
+    if not target_dir:
+        return
+    path = Path(target_dir).resolve()
+    if not path.is_dir():
+        console.print(f"[red]--dir target does not exist: {path}[/red]")
+        sys.exit(1)
+    os.chdir(path)
+
+
+def _count_failed_tasks(run_dir: Path) -> int:
+    """Count tasks with ``success = false`` across all phases of a run.
+
+    Source of truth is each task's ``task.toml`` — independent of whether the
+    dedupe agent ran or correctly emitted the count.
+    """
+    import tomllib
+    count = 0
+    for tt in run_dir.glob("*/*/task.toml"):
+        try:
+            data = tomllib.loads(tt.read_text())
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        if data.get("success") is False:
+            count += 1
+    return count
+
+
 def _summary_counts_from_findings(findings_path: Path) -> dict[str, int]:
     """Best-effort parse of FINDINGS.md scan summary counts.
 
@@ -439,6 +568,7 @@ def _summary_counts_from_findings(findings_path: Path) -> dict[str, int]:
         ("confirmed", r"\*\*Confirmed:\*\*\s+(\d+)"),
         ("rejected", r"\*\*Rejected:\*\*\s+(\d+)"),
         ("needs_review", r"\*\*Needs review:\*\*\s+(\d+)"),
+        ("failed", r"\*\*Failed:\*\*\s+(\d+)"),
         ("unique_vulns", r"\*\*Unique vulnerabilities:\*\*\s+(\d+)"),
     ):
         m = re.search(pattern, text, re.IGNORECASE)
@@ -481,7 +611,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         shutil.copy2(src, config_path)
     else:
         config_path.write_text(
-            "# vuln-scanner config. See config.example.toml in the vuln-scanner\n"
+            "# vuln-scanner config. See vuln-scanner.example.toml in the vuln-scanner\n"
             "# repo for the full set of options with comments.\n"
             "\n"
             "[scan]\n"
@@ -522,6 +652,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     console = Console(stderr=True)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
+    _chdir_if_requested(args, console)
     inv_dir = _require_investigation_dir(console)
     cfg = load_config(str(inv_dir / CONFIG_NAME))
 
@@ -543,19 +674,26 @@ def cmd_run(args: argparse.Namespace) -> None:
     worktree_dir = inv_dir / WORKTREES_DIRNAME
     worktree_dir.mkdir(exist_ok=True)
     (run_dir / "logs").mkdir(exist_ok=True)
+    (run_dir / TRANSCRIPTS_DIRNAME).mkdir(exist_ok=True)
+
+    # Snapshot the fully-resolved config so each run is self-describing.
+    (run_dir / RUN_CONFIG_NAME).write_text(cfg.dump_effective_toml())
 
     prior_runs_path = str(inv_dir / RUNS_DIRNAME)
 
-    # Per-run manifest with models recorded
+    # Per-run manifest. Only record models that were explicitly configured;
+    # the actual model used per task is captured in each task's task.toml.
+    configured_models: dict[str, str] = {
+        phase: model
+        for phase in ("recon", "hunt", "validate", "dedupe", "consolidate")
+        if (model := cfg.model_for(phase))
+    }
     run_manifest = RunManifest(
         run_id=run_id,
         target_sha=target_sha,
         tool_version=_tool_version(),
         started_at=investigation.iso_now(),
-        models={
-            phase: cfg.model_for(phase) or "(backend default)"
-            for phase in ("recon", "hunt", "validate", "dedupe", "consolidate")
-        },
+        models=configured_models,
     )
     run_manifest.dump(run_dir / investigation.RUN_MANIFEST_NAME)
 
@@ -597,9 +735,13 @@ def cmd_run(args: argparse.Namespace) -> None:
             raise
         finally:
             run_manifest.finished_at = investigation.iso_now()
-            run_manifest.summary = _summary_counts_from_findings(
+            summary = _summary_counts_from_findings(
                 run_dir / "dedupe" / cfg.dedupe_output
             )
+            # Trust task.toml provenance over the dedupe agent's count —
+            # dedupe may have skipped, omitted, or itself failed.
+            summary["failed"] = _count_failed_tasks(run_dir)
+            run_manifest.summary = summary
             run_manifest.dump(run_dir / investigation.RUN_MANIFEST_NAME)
 
     # Update top-level pointers
@@ -610,7 +752,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     console.print()
     console.print(f"[dim]Run output: {run_dir}[/dim]")
-    if (run_dir / SUMMARY_NAME).is_file():
+    if (run_dir / "consolidate" / SUMMARY_NAME).is_file():
         console.print(f"[dim]Summary: {inv_dir / SUMMARY_NAME}[/dim]")
 
 
@@ -621,6 +763,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 def cmd_status(args: argparse.Namespace) -> None:
     console = Console()
+    _chdir_if_requested(args, console)
     inv_dir = _require_investigation_dir(console)
     inv_manifest = Manifest.load(inv_dir / "MANIFEST.toml")
 
@@ -648,6 +791,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     table.add_column("Models (recon/hunt/validate)")
     table.add_column("Confirmed", justify="right")
     table.add_column("Rejected", justify="right")
+    table.add_column("Failed", justify="right")
     table.add_column("Vulns", justify="right")
 
     for run_dir in runs:
@@ -656,9 +800,9 @@ def cmd_status(args: argparse.Namespace) -> None:
             continue
         m = RunManifest.load(mpath)
         models = (
-            f"{m.models.get('recon', '-')[:18]} / "
-            f"{m.models.get('hunt', '-')[:18]} / "
-            f"{m.models.get('validate', '-')[:18]}"
+            f"{(m.models.get('recon') or 'default')[:18]} / "
+            f"{(m.models.get('hunt') or 'default')[:18]} / "
+            f"{(m.models.get('validate') or 'default')[:18]}"
         )
         status_color = {
             "completed": "green",
@@ -674,6 +818,7 @@ def cmd_status(args: argparse.Namespace) -> None:
             models,
             str(m.summary.get("confirmed", "-")),
             str(m.summary.get("rejected", "-")),
+            str(m.summary.get("failed", "-")),
             str(m.summary.get("unique_vulns", "-")),
         )
 
@@ -708,6 +853,10 @@ def main() -> None:
         help="Execute one scan run against target/ in cwd.",
     )
     p_run.add_argument(
+        "-C", "--dir",
+        help="Investigation directory to operate on (default: cwd)",
+    )
+    p_run.add_argument(
         "--sha",
         help="Target commit SHA to pin (default: keep current target HEAD)",
     )
@@ -723,6 +872,10 @@ def main() -> None:
     p_status = sub.add_parser(
         "status",
         help="List runs in this investigation.",
+    )
+    p_status.add_argument(
+        "-C", "--dir",
+        help="Investigation directory to operate on (default: cwd)",
     )
     p_status.set_defaults(func=cmd_status)
 

@@ -8,6 +8,7 @@ authors = [{ name = "Patrick Jackson", email = "patrick@jackson.dev" }]
 
 dependencies = [
     "rich>=13.0",
+    "claude-agent-sdk>=0.2",
 ]
 
 [project.optional-dependencies]

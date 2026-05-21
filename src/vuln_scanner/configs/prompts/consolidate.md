@@ -55,7 +55,7 @@ Write SUMMARY.md in the repo root:
 > Prior runs considered: <N>  (most recent: <prior run-id> at <prior SHA>)
 
 ## Overview
-- **This run's tasks:** <N>  (confirmed <N>, rejected <N>, needs-review <N>)
+- **This run's tasks:** <N>  (confirmed <N>, rejected <N>, needs-review <N>, failed <N>)
 - **Cumulative unique vulnerabilities:** <N>
   (NEW: <n>, PERSISTS: <n>, FIXED: <n>, REGRESSED: <n>)
 - **By severity (active only — NEW + PERSISTS + REGRESSED):**
@@ -90,10 +90,19 @@ Write SUMMARY.md in the repo root:
 
 ---
 ### VULN-002: ...
+
+## Failed Investigations (this run)
+
+Carry forward the "Failed Investigations" section from
+`reports/dedupe/FINDINGS.md` verbatim if present, so the cumulative SUMMARY.md
+makes clear which codepaths this run did NOT clear. Continuation runs read
+this section to know what to re-attempt. Omit the heading entirely if no
+tasks failed.
 ```
 
 Sort by status (NEW + REGRESSED first, then PERSISTS, then FIXED), then by
 severity within each group. Be thorough but concise.
 
 If this run found zero new vulnerabilities and nothing changed in prior
-findings' status, write a brief report stating that explicitly.
+findings' status, write a brief report stating that explicitly. Failed
+investigations still get listed — they are not a "no findings" outcome.
