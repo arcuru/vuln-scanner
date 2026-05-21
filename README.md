@@ -59,10 +59,12 @@ its own git repo — it stays consistent.
 
 ## Scan archive
 
-This repo doubles as a running archive of scans, under [`scans/`](scans/). Each
-subfolder is one investigation directory: config + manifest + per-run output.
-The cloned target and ephemeral worktrees are gitignored, so what's committed
-is just the audit trail.
+This repo also archives scans via a git submodule at [`scans/`](scans/)
+([`arcuru/vuln-scans`](https://github.com/arcuru/vuln-scans)). Each subfolder is one
+investigation directory: config + manifest + per-run output. The cloned target
+and ephemeral worktrees are gitignored, so what's committed is the audit trail.
+
+Clone with `--recurse-submodules` to pull the scan archive alongside the tool.
 
 | Target | Source |
 |---|---|
